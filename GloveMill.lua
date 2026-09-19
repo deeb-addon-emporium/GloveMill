@@ -51,6 +51,103 @@ end
 -- ---------------------------------------------------------------------------
 -- Auction house: two API shapes
 -- ---------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- Expected disenchant result, from the classic tables (green items only)
+-- ---------------------------------------------------------------------------
+local DE_TABLE = {
+	{ 5, 15,  "Strange Dust",  "Lesser Magic Essence",   nil },
+	{ 16, 20, "Strange Dust",  "Greater Magic Essence",  "Small Glimmering Shard" },
+	{ 21, 25, "Strange Dust",  "Lesser Astral Essence",  "Large Glimmering Shard" },
+	{ 26, 30, "Soul Dust",     "Greater Astral Essence", "Small Glowing Shard" },
+	{ 31, 35, "Soul Dust",     "Lesser Mystic Essence",  "Large Glowing Shard" },
+	{ 36, 40, "Vision Dust",   "Greater Mystic Essence", "Small Radiant Shard" },
+	{ 41, 45, "Vision Dust",   "Lesser Nether Essence",  "Large Radiant Shard" },
+	{ 46, 50, "Dream Dust",    "Greater Nether Essence", "Small Brilliant Shard" },
+	{ 51, 55, "Dream Dust",    "Lesser Eternal Essence", "Large Brilliant Shard" },
+	{ 56, 65, "Illusion Dust", "Greater Eternal Essence","Large Brilliant Shard" },
+}
+local CLASS_WEAPON = (Enum and Enum.ItemClass and Enum.ItemClass.Weapon) or 2
+local CLASS_ARMOR  = (Enum and Enum.ItemClass and Enum.ItemClass.Armor) or 4
+local UNCOMMON     = (Enum and Enum.ItemQuality and Enum.ItemQuality.Uncommon) or 2
+
+local EPIC         = (Enum and Enum.ItemQuality and Enum.ItemQuality.Epic) or 4
+local ARMOR_MISC   = 0            -- shirts, tabards: not disenchantable
+
+-- name, ilvl, quality, classID, subClassID for an item name / link / id
+local function itemFacts(item)
+	local fn = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+	if not fn or not item then return end
+	local ok, name, _, quality, ilvl, _, _, _, _, _, _, _, classID, subClassID = pcall(fn, item)
+	if not ok or not name then return end
+	return name, ilvl, quality, classID, subClassID
+end
+
+-- Can Disenchant take it? Green to epic, a weapon or armor, and not a shirt/tabard.
+local function deable(quality, classID, subClassID)
+	if type(quality) ~= "number" or quality < UNCOMMON or quality > EPIC then return false end
+	if classID == CLASS_WEAPON then return true end
+	if classID == CLASS_ARMOR then return subClassID ~= ARMOR_MISC end
+	return false
+end
+
+-- ---------------------------------------------------------------------------
+-- Presets: churn through every green weapon/armor in an ilvl bracket, cheapest first
+-- ---------------------------------------------------------------------------
+local PRESETS = {
+	{ key = "item", label = "Single item by name" },
+	{ key = "w5",  label = "Weapons ilvl 5-15  (Lesser Magic Essence)",  classID = CLASS_WEAPON, min = 5,  max = 15 },
+	{ key = "w16", label = "Weapons ilvl 16-20 (Greater Magic Essence)", classID = CLASS_WEAPON, min = 16, max = 20 },
+	{ key = "w21", label = "Weapons ilvl 21-25 (Lesser Astral Essence)", classID = CLASS_WEAPON, min = 21, max = 25 },
+	{ key = "w26", label = "Weapons ilvl 26-30 (Greater Astral Essence)", classID = CLASS_WEAPON, min = 26, max = 30 },
+	{ key = "a5",  label = "Armor ilvl 5-15  (Strange Dust)",             classID = CLASS_ARMOR,  min = 5,  max = 15 },
+	{ key = "a16", label = "Armor ilvl 16-20 (Strange Dust)",             classID = CLASS_ARMOR,  min = 16, max = 20 },
+	{ key = "a26", label = "Armor ilvl 26-30 (Soul Dust)",                classID = CLASS_ARMOR,  min = 26, max = 30 },
+}
+local function currentPreset()
+	local k = db and db.preset or "item"
+	for _, p in ipairs(PRESETS) do if p.key == k and p.classID then return p end end
+	return nil
+end
+local function presetLabel()
+	local k = db and db.preset or "item"
+	for _, p in ipairs(PRESETS) do if p.key == k then return p.label end end
+	return PRESETS[1].label
+end
+-- does an item (by id/link) fit what we are hunting right now?
+local function wanted(item)
+	local name, ilvl, quality, classID, subClassID = itemFacts(item)
+	if not name then return nil end                       -- unknown yet
+	local p = currentPreset()
+	if p then
+		return deable(quality, classID, subClassID) and classID == p.classID
+			and type(ilvl) == "number" and ilvl >= p.min and ilvl <= p.max, name
+	end
+	return sameName(name, targetName()), name
+end
+
+
+-- returns a one-line expectation, and a kind ("weapon"/"armor"), or nil + reason
+local function expectedDE(ilvl, quality, classID, subClassID)
+	if quality ~= UNCOMMON then return nil, "only green items are tabled" end
+	if not deable(quality, classID, subClassID) then return nil, "not disenchantable" end
+	if type(ilvl) ~= "number" then return nil, "no item level" end
+	local row
+	for _, r in ipairs(DE_TABLE) do if ilvl >= r[1] and ilvl <= r[2] then row = r; break end end
+	if not row then return nil, "ilvl " .. ilvl .. " is outside the table" end
+	local weapon = classID == CLASS_WEAPON
+	local dustPct, essPct = 75, 20
+	if weapon then dustPct, essPct = 20, 75 end
+	local shardPct = row[5] and 5 or 0
+	if not row[5] then dustPct = weapon and 20 or 80; essPct = weapon and 80 or 20 end
+	local parts = {
+		string.format("%d%% %s", essPct, row[4]),
+		string.format("%d%% %s", dustPct, row[3]),
+	}
+	if row[5] then parts[#parts + 1] = string.format("%d%% %s", shardPct, row[5]) end
+	return table.concat(parts, ", "), weapon and "weapon" or "armor", essPct
+end
+
+
 local hasNewAH = type(C_AuctionHouse) == "table" and type(C_AuctionHouse.SendSearchQuery) == "function"
 local hasOldAH = type(QueryAuctionItems) == "function"
 
@@ -80,9 +177,27 @@ local function nameForID(id)
 	end
 end
 
+-- preset mode state
+local queue, queued, fetching, browsePages, browseRetries = {}, 0, nil, 0, 0
+local MAX_PREFETCH = 6                 -- item searches per scan; each one is a throttled call
+local prefetchNext                     -- forward
+
 local function scan()
-	results = {}
+	results = {}; queue = {}; queued = 0; fetching = nil; browsePages = 0; browseRetries = 0
 	if not ahOpen then msg("open the auction house first"); return end
+	local p = currentPreset()
+	if p then
+		if not hasNewAH then msg("presets need the new auction house API"); return end
+		local q = {
+			searchString = "",
+			sorts = { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } },
+			filters = { Enum.AuctionHouseFilter.UncommonQuality },
+			itemClassFilters = { { classID = p.classID } },
+		}
+		local ok, err = pcall(C_AuctionHouse.SendBrowseQuery, q)
+		if not ok then msg("browse refused: " .. tostring(err)) else msg("scanning " .. p.label .. " under " .. moneyText(cap())) end
+		return
+	end
 	if hasNewAH then
 		local id = itemIDForTarget()
 		if not id then
@@ -104,7 +219,70 @@ local function scan()
 	end
 end
 
+-- item-search results for one queued item key -> listings
+local function collectKey(entry)
+	local n = C_AuctionHouse.GetNumItemSearchResults(entry.key) or 0
+	local added = 0
+	for i = 1, n do
+		local ok, r = pcall(C_AuctionHouse.GetItemSearchResultInfo, entry.key, i)
+		if ok and type(r) == "table" and r.buyoutAmount and r.buyoutAmount > 0
+			and r.itemKey and r.itemKey.itemID == entry.itemID and r.containsOwnerItem ~= true
+			and r.buyoutAmount <= cap() then
+			results[#results + 1] = { price = r.buyoutAmount, count = r.quantity or 1, id = r.auctionID, name = entry.name, itemID = entry.itemID }
+			added = added + 1
+		end
+	end
+	return added
+end
+
+prefetchNext = function()
+	if not currentPreset() or fetching or not ahOpen then return end
+	if queued >= MAX_PREFETCH or queued >= #queue then return end
+	local entry = queue[queued + 1]
+	fetching = entry
+	local sorts = { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } }
+	local ok = pcall(C_AuctionHouse.SendSearchQuery, entry.key, sorts, false)
+	if not ok then fetching = nil end   -- throttled: AUCTION_HOUSE_THROTTLED_SYSTEM_READY retries
+end
+
+local function onPresetBrowse()
+	local p = currentPreset()
+	if not p then return end
+	local list = C_AuctionHouse.GetBrowseResults and C_AuctionHouse.GetBrowseResults() or {}
+	local seen, needRetry = {}, false
+	queue = {}
+	for _, r in ipairs(list) do
+		local key = r.itemKey
+		if key and key.itemID and not seen[key.itemID] then
+			seen[key.itemID] = true
+			local fits, name = wanted(key.itemID)
+			if fits == nil then
+				needRetry = true
+				if C_Item and C_Item.RequestLoadItemDataByID then pcall(C_Item.RequestLoadItemDataByID, key.itemID) end
+			elseif fits and r.minPrice and r.minPrice <= cap() and r.containsOwnerItem ~= true then
+				queue[#queue + 1] = { key = key, itemID = key.itemID, name = name, minPrice = r.minPrice }
+			end
+		end
+	end
+	-- more pages? (results are cumulative)
+	if C_AuctionHouse.HasFullBrowseResults and not C_AuctionHouse.HasFullBrowseResults() and browsePages < 3 then
+		browsePages = browsePages + 1
+		pcall(C_AuctionHouse.RequestMoreBrowseResults)
+		return
+	end
+	table.sort(queue, function(a, b) return a.minPrice < b.minPrice end)
+	if needRetry and browseRetries < 3 then
+		browseRetries = browseRetries + 1
+		C_Timer.After(1, onPresetBrowse)      -- item data arrived by then; rebuild the queue
+	end
+	msg(string.format("%d item type(s) fit, cheapest %s - pulling listings", #queue, queue[1] and moneyText(queue[1].minPrice) or "-"))
+	queued = 0; fetching = nil; results = {}
+	prefetchNext()
+	if win and win:IsShown() then win.refresh() end
+end
+
 local function onBrowse()
+	if currentPreset() then onPresetBrowse(); return end
 	if db.itemID and db.itemIDName == targetName() then return end
 	local list = C_AuctionHouse.GetBrowseResults and C_AuctionHouse.GetBrowseResults() or {}
 	for _, r in ipairs(list) do
@@ -124,6 +302,15 @@ local function onBrowse()
 end
 
 local function collectNew()
+	if currentPreset() then
+		if fetching then
+			collectKey(fetching)
+			queued = queued + 1
+			fetching = nil
+			C_Timer.After(0.3, prefetchNext)
+		end
+		return
+	end
 	results = {}
 	local id = itemIDForTarget()
 	if not id then return end
@@ -133,7 +320,7 @@ local function collectNew()
 		local ok, r = pcall(C_AuctionHouse.GetItemSearchResultInfo, key, i)
 		if ok and type(r) == "table" and r.buyoutAmount and r.buyoutAmount > 0
 			and r.itemKey and r.itemKey.itemID == id and r.containsOwnerItem ~= true then
-			results[#results + 1] = { price = r.buyoutAmount, count = r.quantity or 1, id = r.auctionID, name = nameForID(id) or targetName() }
+			results[#results + 1] = { price = r.buyoutAmount, count = r.quantity or 1, id = r.auctionID, name = nameForID(id) or targetName(), itemID = id }
 		end
 	end
 end
@@ -170,7 +357,8 @@ local function buyNext()
 	if GetTime() - lastBuy < BUY_COOLDOWN then return end
 	local r, why = pickNext()
 	if not r then msg(why); return end
-	if not sameName(r.name, targetName()) then msg("refusing: listing is '" .. tostring(r.name) .. "', not " .. targetName()); return end
+	local fits = wanted(r.itemID or r.name)
+	if not fits then msg("refusing: listing '" .. tostring(r.name) .. "' does not fit " .. presetLabel()); return end
 	if r.price > cap() then msg("refusing: over cap"); return end
 	if GetMoney() < r.price then msg("not enough gold"); return end
 
@@ -188,6 +376,10 @@ local function buyNext()
 	db.bought = (db.bought or 0) + 1
 	db.spent = (db.spent or 0) + r.price
 	msg(string.format("bought 1 for %s  (session: %d for %s)", moneyText(r.price), db.bought, moneyText(db.spent)))
+	if currentPreset() and #results < 3 then
+		if queued < #queue then MAX_PREFETCH = queued + 3; prefetchNext()
+		elseif queued >= #queue and #results == 0 then msg("queue empty - Scan again for fresh listings") end
+	end
 end
 
 -- ---------------------------------------------------------------------------
@@ -206,9 +398,12 @@ local function bagCount()
 			local hit = false
 			if GetItemInfoAt then
 				local info = GetItemInfoAt(b, s)
-				if info and id and info.itemID == id and not info.isLocked then hit = true end
+				if info and not info.isLocked then
+					if currentPreset() then hit = wanted(info.itemID) == true
+					elseif id and info.itemID == id then hit = true end
+				end
 			end
-			if not hit and GetItemLinkAt then
+			if not hit and not currentPreset() and GetItemLinkAt then
 				local link = GetItemLinkAt(b, s)
 				if link and string.find(link, "%[" .. targetName() .. "%]") then hit = true end
 			end
@@ -337,60 +532,13 @@ local function matsText(tbl)
 	return #out > 0 and table.concat(out, ", ") or "nothing yet"
 end
 
--- ---------------------------------------------------------------------------
--- Expected disenchant result, from the classic tables (green items only)
--- ---------------------------------------------------------------------------
-local DE_TABLE = {
-	{ 5, 15,  "Strange Dust",  "Lesser Magic Essence",   nil },
-	{ 16, 20, "Strange Dust",  "Greater Magic Essence",  "Small Glimmering Shard" },
-	{ 21, 25, "Strange Dust",  "Lesser Astral Essence",  "Large Glimmering Shard" },
-	{ 26, 30, "Soul Dust",     "Greater Astral Essence", "Small Glowing Shard" },
-	{ 31, 35, "Soul Dust",     "Lesser Mystic Essence",  "Large Glowing Shard" },
-	{ 36, 40, "Vision Dust",   "Greater Mystic Essence", "Small Radiant Shard" },
-	{ 41, 45, "Vision Dust",   "Lesser Nether Essence",  "Large Radiant Shard" },
-	{ 46, 50, "Dream Dust",    "Greater Nether Essence", "Small Brilliant Shard" },
-	{ 51, 55, "Dream Dust",    "Lesser Eternal Essence", "Large Brilliant Shard" },
-	{ 56, 65, "Illusion Dust", "Greater Eternal Essence","Large Brilliant Shard" },
-}
-local CLASS_WEAPON = (Enum and Enum.ItemClass and Enum.ItemClass.Weapon) or 2
-local CLASS_ARMOR  = (Enum and Enum.ItemClass and Enum.ItemClass.Armor) or 4
-local UNCOMMON     = (Enum and Enum.ItemQuality and Enum.ItemQuality.Uncommon) or 2
-
--- name, ilvl, quality, classID for an item name / link / id
-local function itemFacts(item)
-	local fn = (C_Item and C_Item.GetItemInfo) or GetItemInfo
-	if not fn or not item then return end
-	local ok, name, _, quality, ilvl, _, _, _, _, _, _, _, classID = pcall(fn, item)
-	if not ok or not name then return end
-	return name, ilvl, quality, classID
-end
-
--- returns a one-line expectation, and a kind ("weapon"/"armor"), or nil + reason
-local function expectedDE(ilvl, quality, classID)
-	if quality ~= UNCOMMON then return nil, "only green items are tabled" end
-	if type(ilvl) ~= "number" then return nil, "no item level" end
-	local row
-	for _, r in ipairs(DE_TABLE) do if ilvl >= r[1] and ilvl <= r[2] then row = r; break end end
-	if not row then return nil, "ilvl " .. ilvl .. " is outside the table" end
-	local weapon = classID == CLASS_WEAPON
-	local dustPct, essPct = 75, 20
-	if weapon then dustPct, essPct = 20, 75 end
-	local shardPct = row[5] and 5 or 0
-	if not row[5] then dustPct = weapon and 20 or 80; essPct = weapon and 80 or 20 end
-	local parts = {
-		string.format("%d%% %s", essPct, row[4]),
-		string.format("%d%% %s", dustPct, row[3]),
-	}
-	if row[5] then parts[#parts + 1] = string.format("%d%% %s", shardPct, row[5]) end
-	return table.concat(parts, ", "), weapon and "weapon" or "armor", essPct
-end
-
 -- tooltip line on every green item
 local function addTooltipLine(tt, link)
 	if db and db.tooltip == false then return end
-	local name, ilvl, quality, classID = itemFacts(link)
+	local name, ilvl, quality, classID, subClassID = itemFacts(link)
 	if not name then return end
-	local text, kind, essPct = expectedDE(ilvl, quality, classID)
+	if not deable(quality, classID, subClassID) then return end
+	local text, kind, essPct = expectedDE(ilvl, quality, classID, subClassID)
 	if not text then return end
 	tt:AddLine(string.format("|cffffd080DE|r ilvl %d %s: %s", ilvl, kind, text), 0.8, 0.8, 0.8, true)
 end
@@ -436,7 +584,7 @@ end
 -- Window
 -- ---------------------------------------------------------------------------
 local win = CreateFrame("Frame", "GloveMillFrame", UIParent, "BasicFrameTemplateWithInset")
-win:SetSize(320, 365)
+win:SetSize(320, 393)
 win:SetPoint("CENTER", 300, 0)
 win:SetMovable(true); win:EnableMouse(true); win:RegisterForDrag("LeftButton")
 win:SetScript("OnDragStart", win.StartMoving)
@@ -446,8 +594,28 @@ win:Hide()
 if win.TitleText then win.TitleText:SetText("GloveMill") end
 tinsert(UISpecialFrames, "GloveMillFrame")
 
+-- preset dropdown
+local presetDrop = CreateFrame("Frame", "GloveMillPresetDrop", win, "UIDropDownMenuTemplate")
+presetDrop:SetPoint("TOPLEFT", -2, -26)
+UIDropDownMenu_SetWidth(presetDrop, 270)
+UIDropDownMenu_Initialize(presetDrop, function(self, level)
+	for _, p in ipairs(PRESETS) do
+		local info = UIDropDownMenu_CreateInfo()
+		info.text = p.label
+		info.checked = (db and db.preset or "item") == p.key
+		info.func = function()
+			db.preset = p.key
+			results = {}; queue = {}
+			UIDropDownMenu_SetText(presetDrop, p.label)
+			msg("preset: " .. p.label .. (p.classID and "  -  set the cap, then Scan" or ""))
+			win.refresh()
+		end
+		UIDropDownMenu_AddButton(info, level)
+	end
+end)
+
 local itemLbl = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-itemLbl:SetPoint("TOPLEFT", 14, -32); itemLbl:SetText("Item:")
+itemLbl:SetPoint("TOPLEFT", 14, -60); itemLbl:SetText("Item:")
 local itemBoxMain = CreateFrame("EditBox", "GloveMillItemBoxMain", win, "InputBoxTemplate")
 itemBoxMain:SetSize(230, 20); itemBoxMain:SetPoint("LEFT", itemLbl, "RIGHT", 10, 0); itemBoxMain:SetAutoFocus(false)
 itemBoxMain:SetScript("OnEnterPressed", function(self)
@@ -462,10 +630,10 @@ if hooksecurefunc and ChatEdit_InsertLink then
 end
 
 local deLine = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-deLine:SetPoint("TOPLEFT", 14, -54); deLine:SetWidth(290); deLine:SetJustifyH("LEFT")
+deLine:SetPoint("TOPLEFT", 14, -82); deLine:SetWidth(290); deLine:SetJustifyH("LEFT")
 
 local capLabel = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-capLabel:SetPoint("TOPLEFT", 14, -76)
+capLabel:SetPoint("TOPLEFT", 14, -104)
 capLabel:SetText("Max buyout:")
 
 local capBox = CreateFrame("EditBox", "GloveMillCapBox", win, "InputBoxTemplate")
@@ -481,11 +649,11 @@ end)
 capBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 
 local status = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-status:SetPoint("TOPLEFT", 14, -102)
+status:SetPoint("TOPLEFT", 14, -130)
 status:SetWidth(290); status:SetJustifyH("LEFT"); status:SetHeight(50)
 
 local scanBtn = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
-scanBtn:SetSize(90, 24); scanBtn:SetPoint("TOPLEFT", 14, -156); scanBtn:SetText("Scan AH")
+scanBtn:SetSize(90, 24); scanBtn:SetPoint("TOPLEFT", 14, -184); scanBtn:SetText("Scan AH")
 scanBtn:SetScript("OnClick", scan)
 
 local buyBtn = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
@@ -495,7 +663,7 @@ buyBtn:SetScript("OnClick", function() buyNext(); win.refresh() end)
 -- Secure button: the only way an addon may cast. Macro text is rebuilt before each click
 -- (PreClick, out of combat) to point at the next glove in the bags.
 local deBtn = CreateFrame("Button", "GloveMillDEButton", win, "SecureActionButtonTemplate,UIPanelButtonTemplate")
-deBtn:SetSize(218, 28); deBtn:SetPoint("TOPLEFT", 14, -190); deBtn:SetText("Disenchant next")
+deBtn:SetSize(218, 28); deBtn:SetPoint("TOPLEFT", 14, -218); deBtn:SetText("Disenchant next")
 deBtn:RegisterForClicks("AnyUp", "AnyDown")
 deBtn:SetAttribute("type", "macro")
 deBtn:SetScript("PreClick", function(self)
@@ -511,18 +679,24 @@ end)
 deBtn:SetScript("PostClick", function() C_Timer.After(0.5, function() win.refresh() end) end)
 
 local matsLine = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-matsLine:SetPoint("TOPLEFT", 14, -226); matsLine:SetWidth(290); matsLine:SetJustifyH("LEFT"); matsLine:SetHeight(48)
+matsLine:SetPoint("TOPLEFT", 14, -254); matsLine:SetWidth(290); matsLine:SetJustifyH("LEFT"); matsLine:SetHeight(48)
 
 local profitLine = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-profitLine:SetPoint("TOPLEFT", 14, -276); profitLine:SetWidth(290); profitLine:SetJustifyH("LEFT"); profitLine:SetHeight(30)
+profitLine:SetPoint("TOPLEFT", 14, -304); profitLine:SetWidth(290); profitLine:SetJustifyH("LEFT"); profitLine:SetHeight(30)
 
 local hint = win:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 hint:SetPoint("BOTTOMLEFT", 14, 12); hint:SetWidth(290); hint:SetJustifyH("LEFT")
 hint:SetText("One click = one buy or one cast. Type any item name above, or shift-click a link into it.")
 
 function win.refresh()
+	UIDropDownMenu_SetText(presetDrop, presetLabel())
+	local p = currentPreset()
+	itemLbl:SetShown(not p); itemBoxMain:SetShown(not p)
 	if not itemBoxMain:HasFocus() then itemBoxMain:SetText(targetName()) end
-	do
+	if p then
+		local text = expectedDE(p.min, UNCOMMON, p.classID, p.classID == CLASS_WEAPON and 1 or 1)
+		deLine:SetText(string.format("%s\nexpect %s", p.label, text or "?"))
+	else
 		local id = itemIDForTarget()
 		local name, ilvl, quality, classID = itemFacts(id or targetName())
 		if not name then
@@ -536,14 +710,16 @@ function win.refresh()
 			end
 		end
 	end
+	deLine:SetHeight(p and 26 or 14)
 	if not capBox:HasFocus() then capBox:SetText(moneyText(cap())) end
 	sortResults()
 	local under = 0
 	for _, r in ipairs(results) do if r.price <= cap() then under = under + 1 end end
 	local cheapest = results[1] and moneyText(results[1].price) or "-"
 	local inBags = bagCount()
-	status:SetText(string.format("AH: %s   listings: %d   under cap: %d   cheapest: %s\nIn bags: %d   bought this session: %d for %s",
-		ahOpen and "open" or "closed", #results, under, cheapest, inBags, db.bought or 0, moneyText(db.spent or 0)))
+	local qtext = p and string.format("   item types: %d (%d pulled)", #queue, queued) or ""
+	status:SetText(string.format("AH: %s   listings: %d   under cap: %d   cheapest: %s%s\nIn bags: %d   bought this session: %d for %s",
+		ahOpen and "open" or "closed", #results, under, cheapest, qtext, inBags, db.bought or 0, moneyText(db.spent or 0)))
 	matsLine:SetText("Mats this session: " .. matsText(db.mats) .. "\nAll time: " .. matsText(db.matsAll))
 	profitLine:SetText(profitText())
 	buyBtn:SetEnabled(ahOpen and under > 0)
@@ -576,6 +752,8 @@ f:SetScript("OnEvent", function(_, event, arg1)
 		onBrowse()
 	elseif event == "ITEM_SEARCH_RESULTS_UPDATED" and hasNewAH then
 		collectNew()
+	elseif event == "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" and hasNewAH then
+		if currentPreset() and not fetching then prefetchNext() end
 	elseif event == "AUCTION_ITEM_LIST_UPDATE" and hasOldAH and not hasNewAH then
 		collectOld()
 	end
@@ -589,6 +767,11 @@ SlashCmdList.GLOVEMILL = function(input)
 	if cmd == "cap" then
 		local c = parseMoney(rest)
 		if c then db.cap = c; msg("cap is now " .. moneyText(c)) else msg("say it like: /gm cap 2g50s") end
+	elseif cmd == "preset" then
+		local found
+		for _, p in ipairs(PRESETS) do if p.key == rest then found = p end end
+		if found then db.preset = found.key; results = {}; queue = {}; msg("preset: " .. found.label)
+		else msg("presets: " .. (function() local t = {} for _, p in ipairs(PRESETS) do t[#t+1] = p.key end return table.concat(t, " ") end)()) end
 	elseif cmd == "mats" then
 		msg("this session: " .. matsText(db.mats))
 		msg("all time: " .. matsText(db.matsAll))
