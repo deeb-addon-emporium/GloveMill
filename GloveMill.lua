@@ -370,6 +370,8 @@ local function pickNext()
 	return r
 end
 
+local batchLeft, batchTimer = 0, nil   -- Buy 5 state, driven below
+
 -- Runs from a button click only. One listing per call. Re-checks the name and the cap
 -- right before the buy so a stale list can never buy the wrong thing.
 local function buyNext()
@@ -391,6 +393,12 @@ local function buyNext()
 		ok, err = pcall(PlaceAuctionBid, "list", r.id, r.price)
 	end
 	if not ok then
+		local e = string.lower(tostring(err))
+		if string.find(e, "protected", 1, true) or string.find(e, "hardware", 1, true) or string.find(e, "secure", 1, true) then
+			batchLeft = 0
+			msg("this client only lets a real click buy - Buy 5 is off, use Buy 1")
+			return "protected"
+		end
 		msg("buy refused: " .. tostring(err) .. " - will retry when the AH is ready")
 		return false
 	end
@@ -408,12 +416,18 @@ end
 
 -- Batch: buy N, one per throttle window. Driven by AUCTION_HOUSE_THROTTLED_SYSTEM_READY,
 -- with a timer fallback in case the event never comes.
-local batchLeft, batchTimer = 0, nil
+local batchFails = 0
 local function batchStep()
 	if batchLeft <= 0 or not ahOpen then batchLeft = 0; return end
 	local r = pickNext()
 	if not r then batchLeft = 0; msg("batch done: nothing left under cap"); return end
-	if buyNext() == true then batchLeft = batchLeft - 1 end
+	local res = buyNext()
+	if res == true then batchLeft = batchLeft - 1; batchFails = 0
+	elseif res == "protected" then return
+	else
+		batchFails = (batchFails or 0) + 1
+		if batchFails >= 3 then batchLeft = 0; msg("batch stopped: the AH kept refusing, try Buy 1"); return end
+	end
 	if batchLeft <= 0 then msg("batch done") end
 	if win and win.refresh and win:IsShown() then win.refresh() end
 	-- fallback: if the throttle-ready event does not arrive, poke again
