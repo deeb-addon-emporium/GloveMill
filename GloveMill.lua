@@ -315,13 +315,19 @@ local function onBrowse()
 	msg("no listing called '" .. targetName() .. "' right now - check the spelling, or /gm item with a shift-clicked link")
 end
 
-local function collectNew()
+local function collectNew(itemKey)
 	if currentPreset() then
-		if fetching then
+		if fetching and (not itemKey or itemKey.itemID == fetching.itemID) then
 			collectKey(fetching)
 			queued = queued + 1
 			fetching = nil
 			C_Timer.After(0.3, prefetchNext)
+		elseif itemKey and itemKey.itemID then
+			-- refreshed results for something we already pulled (after a buy): replace its rows
+			for i = #results, 1, -1 do if results[i].itemID == itemKey.itemID then table.remove(results, i) end end
+			for _, e in ipairs(queue) do
+				if e.itemID == itemKey.itemID then collectKey(e); break end
+			end
 		end
 		return
 	end
@@ -385,15 +391,8 @@ local function buyNext()
 		ok, err = pcall(PlaceAuctionBid, "list", r.id, r.price)
 	end
 	if not ok then
-		msg("buy refused: " .. tostring(err) .. " - dropping it and re-pulling")
-		table.remove(results, 1)
-		if currentPreset() and hasNewAH and r.itemID then
-			local sorts = { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } }
-			fetching = { key = C_AuctionHouse.MakeItemKey(r.itemID), itemID = r.itemID, name = r.name }
-			queued = math.max(0, queued - 1)
-			pcall(C_AuctionHouse.SendSearchQuery, fetching.key, sorts, false)
-		end
-		return
+		msg("buy refused: " .. tostring(err) .. " - will retry when the AH is ready")
+		return false
 	end
 	lastBuy = GetTime()
 	table.remove(results, 1)
@@ -404,6 +403,27 @@ local function buyNext()
 		if queued < #queue then MAX_PREFETCH = queued + 3; prefetchNext()
 		elseif queued >= #queue and #results == 0 then msg("queue empty - Scan again for fresh listings") end
 	end
+	return true
+end
+
+-- Batch: buy N, one per throttle window. Driven by AUCTION_HOUSE_THROTTLED_SYSTEM_READY,
+-- with a timer fallback in case the event never comes.
+local batchLeft, batchTimer = 0, nil
+local function batchStep()
+	if batchLeft <= 0 or not ahOpen then batchLeft = 0; return end
+	local r = pickNext()
+	if not r then batchLeft = 0; msg("batch done: nothing left under cap"); return end
+	if buyNext() == true then batchLeft = batchLeft - 1 end
+	if batchLeft <= 0 then msg("batch done") end
+	if win and win.refresh and win:IsShown() then win.refresh() end
+	-- fallback: if the throttle-ready event does not arrive, poke again
+	if batchTimer then batchTimer:Cancel() end
+	if batchLeft > 0 then batchTimer = C_Timer.NewTimer(1.5, batchStep) end
+end
+local function buyBatch(n)
+	batchLeft = n
+	lastBuy = 0
+	batchStep()
 end
 
 -- ---------------------------------------------------------------------------
@@ -681,8 +701,12 @@ scanBtn:SetSize(90, 24); scanBtn:SetPoint("TOPLEFT", 14, -184); scanBtn:SetText(
 scanBtn:SetScript("OnClick", scan)
 
 local buyBtn = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
-buyBtn:SetSize(120, 24); buyBtn:SetPoint("LEFT", scanBtn, "RIGHT", 8, 0); buyBtn:SetText("Buy cheapest")
-buyBtn:SetScript("OnClick", function() buyNext(); win.refresh() end)
+buyBtn:SetSize(70, 24); buyBtn:SetPoint("LEFT", scanBtn, "RIGHT", 8, 0); buyBtn:SetText("Buy 1")
+buyBtn:SetScript("OnClick", function() batchLeft = 0; buyNext(); win.refresh() end)
+
+local buy5Btn = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
+buy5Btn:SetSize(70, 24); buy5Btn:SetPoint("LEFT", buyBtn, "RIGHT", 8, 0); buy5Btn:SetText("Buy 5")
+buy5Btn:SetScript("OnClick", function() buyBatch(5) end)
 
 -- Secure button: the only way an addon may cast. Macro text is rebuilt before each click
 -- (PreClick, out of combat) to point at the next glove in the bags.
@@ -747,6 +771,8 @@ function win.refresh()
 	matsLine:SetText("Mats this session: " .. matsText(db.mats) .. "\nAll time: " .. matsText(db.matsAll))
 	profitLine:SetText(profitText())
 	buyBtn:SetEnabled(ahOpen and under > 0)
+	buy5Btn:SetEnabled(ahOpen and under > 0)
+	buy5Btn:SetText(batchLeft > 0 and ("..." .. batchLeft) or "Buy 5")
 	deBtn:SetEnabled(inBags > 0 and not InCombatLockdown())
 end
 win:SetScript("OnShow", win.refresh)
@@ -775,9 +801,10 @@ f:SetScript("OnEvent", function(_, event, arg1)
 	elseif event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" and hasNewAH then
 		onBrowse()
 	elseif event == "ITEM_SEARCH_RESULTS_UPDATED" and hasNewAH then
-		collectNew()
+		collectNew(arg1)
 	elseif event == "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" and hasNewAH then
-		if currentPreset() and not fetching then prefetchNext() end
+		if batchLeft > 0 then lastBuy = 0; batchStep()
+		elseif currentPreset() and not fetching then prefetchNext() end
 	elseif event == "AUCTION_ITEM_LIST_UPDATE" and hasOldAH and not hasNewAH then
 		collectOld()
 	end
