@@ -12,7 +12,7 @@
 
 local DEFAULT_ITEM = "Embossed Leather Gloves"
 local DEFAULT_CAP  = 20000            -- 2g, in copper
-local BUY_COOLDOWN = 0.8              -- seconds between buys; the AH throttles anyway
+local BUY_COOLDOWN = 0.25             -- seconds between buys; the server throttles anyway
 
 GloveMillDB = GloveMillDB or {}
 local db
@@ -354,7 +354,7 @@ end
 -- right before the buy so a stale list can never buy the wrong thing.
 local function buyNext()
 	if not ahOpen then msg("auction house is closed"); return end
-	if GetTime() - lastBuy < BUY_COOLDOWN then return end
+	if GetTime() - lastBuy < BUY_COOLDOWN then msg("too fast, click again"); return end
 	local r, why = pickNext()
 	if not r then msg(why); return end
 	local fits = wanted(r.itemID or r.name)
@@ -370,7 +370,17 @@ local function buyNext()
 		if not sameName(name, targetName()) then msg("list moved under us - scan again"); return end
 		ok, err = pcall(PlaceAuctionBid, "list", r.id, r.price)
 	end
-	if not ok then msg("buy refused: " .. tostring(err)); return end
+	if not ok then
+		msg("buy refused: " .. tostring(err) .. " - dropping it and re-pulling")
+		table.remove(results, 1)
+		if currentPreset() and hasNewAH and r.itemID then
+			local sorts = { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } }
+			fetching = { key = C_AuctionHouse.MakeItemKey(r.itemID), itemID = r.itemID, name = r.name }
+			queued = math.max(0, queued - 1)
+			pcall(C_AuctionHouse.SendSearchQuery, fetching.key, sorts, false)
+		end
+		return
+	end
 	lastBuy = GetTime()
 	table.remove(results, 1)
 	db.bought = (db.bought or 0) + 1
