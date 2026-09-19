@@ -82,8 +82,22 @@ local function itemFacts(item)
 	return name, ilvl, quality, classID, subClassID
 end
 
--- Can Disenchant take it? Green to epic, a weapon or armor, and not a shirt/tabard.
-local function deable(quality, classID, subClassID)
+-- Things the rules above would allow but Disenchant refuses. Enchanting's own crafted wands
+-- are the known ones; /gm exclude <name> adds more (saved).
+local NEVER_DE = {
+	["lesser magic wand"] = true, ["greater magic wand"] = true,
+	["lesser mystic wand"] = true, ["greater mystic wand"] = true,
+}
+local function excluded(name)
+	local n = string.lower(name or "")
+	if NEVER_DE[n] then return true end
+	local ex = db and db.exclude
+	return type(ex) == "table" and ex[n] == true
+end
+
+-- Can Disenchant take it? Green to epic, a weapon or armor, not a shirt/tabard, not excluded.
+local function deable(quality, classID, subClassID, name)
+	if name and excluded(name) then return false end
 	if type(quality) ~= "number" or quality < UNCOMMON or quality > EPIC then return false end
 	if classID == CLASS_WEAPON then return true end
 	if classID == CLASS_ARMOR then return subClassID ~= ARMOR_MISC end
@@ -119,7 +133,7 @@ local function wanted(item)
 	if not name then return nil end                       -- unknown yet
 	local p = currentPreset()
 	if p then
-		return deable(quality, classID, subClassID) and classID == p.classID
+		return deable(quality, classID, subClassID, name) and classID == p.classID
 			and type(ilvl) == "number" and ilvl >= p.min and ilvl <= p.max, name
 	end
 	return sameName(name, targetName()), name
@@ -547,7 +561,7 @@ local function addTooltipLine(tt, link)
 	if db and db.tooltip == false then return end
 	local name, ilvl, quality, classID, subClassID = itemFacts(link)
 	if not name then return end
-	if not deable(quality, classID, subClassID) then return end
+	if not deable(quality, classID, subClassID, name) then return end
 	local text, kind, essPct = expectedDE(ilvl, quality, classID, subClassID)
 	if not text then return end
 	tt:AddLine(string.format("|cffffd080DE|r ilvl %d %s: %s", ilvl, kind, text), 0.8, 0.8, 0.8, true)
@@ -777,6 +791,19 @@ SlashCmdList.GLOVEMILL = function(input)
 	if cmd == "cap" then
 		local c = parseMoney(rest)
 		if c then db.cap = c; msg("cap is now " .. moneyText(c)) else msg("say it like: /gm cap 2g50s") end
+	elseif cmd == "exclude" and rest ~= "" then
+		local name = string.lower(string.match(rest, "%[(.-)%]") or rest)
+		db.exclude = db.exclude or {}; db.exclude[name] = true; results = {}
+		msg("excluded: " .. name .. " (scan again)")
+	elseif cmd == "include" and rest ~= "" then
+		local name = string.lower(string.match(rest, "%[(.-)%]") or rest)
+		if db.exclude then db.exclude[name] = nil end
+		msg("no longer excluded: " .. name)
+	elseif cmd == "excludes" then
+		local t = {}
+		for n in pairs(NEVER_DE) do t[#t + 1] = n .. " (built in)" end
+		for n in pairs(db.exclude or {}) do t[#t + 1] = n end
+		msg("excluded: " .. (#t > 0 and table.concat(t, ", ") or "nothing"))
 	elseif cmd == "preset" then
 		local found
 		for _, p in ipairs(PRESETS) do if p.key == rest then found = p end end
