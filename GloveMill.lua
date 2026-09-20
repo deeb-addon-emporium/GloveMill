@@ -166,6 +166,7 @@ local hasNewAH = type(C_AuctionHouse) == "table" and type(C_AuctionHouse.SendSea
 local hasOldAH = type(QueryAuctionItems) == "function"
 
 local results = {}         -- { price=, count=, id=<auctionID or list index>, name= }
+local pending = {}         -- auctionID -> order waiting for the server to confirm
 local lastBuy = 0
 local ahOpen = false
 
@@ -323,10 +324,17 @@ local function collectNew(itemKey)
 			fetching = nil
 			C_Timer.After(0.3, prefetchNext)
 		elseif itemKey and itemKey.itemID then
-			-- refreshed results for something we already pulled (after a buy): replace its rows
-			for i = #results, 1, -1 do if results[i].itemID == itemKey.itemID then table.remove(results, i) end end
-			for _, e in ipairs(queue) do
-				if e.itemID == itemKey.itemID then collectKey(e); break end
+			-- the AH re-sends this item's results after a buy: drop listings that vanished,
+			-- never add or reorder (no re-scan between buys, by design)
+			local alive = {}
+			local n = C_AuctionHouse.GetNumItemSearchResults(itemKey) or 0
+			for i = 1, n do
+				local ok, r = pcall(C_AuctionHouse.GetItemSearchResultInfo, itemKey, i)
+				if ok and type(r) == "table" and r.auctionID then alive[r.auctionID] = true end
+			end
+			for i = #results, 1, -1 do
+				local row = results[i]
+				if row.itemID == itemKey.itemID and not alive[row.id] and not pending[row.id] then table.remove(results, i) end
 			end
 		end
 		return
@@ -370,17 +378,37 @@ local function pickNext()
 	return r
 end
 
-local batchLeft, batchTimer = 0, nil   -- Buy 5 state, driven below
+-- One listing per click: the client only allows a purchase from a real click.
+-- A buy is NOT counted when PlaceBid returns. It is counted when the purchase actually
+-- goes through: AUCTION_HOUSE_PURCHASE_COMPLETED for that auction, or the gold leaving
+-- your bags (PLAYER_MONEY) by exactly that price. Until then it sits in `pending`.
+local pendingOrder = {}                 -- auctionIDs in the order they were placed
 
--- Runs from a button click only. One listing per call. Re-checks the name and the cap
--- right before the buy so a stale list can never buy the wrong thing.
+local function settle(auctionID, how)
+	local p = pending[auctionID]
+	if not p then return end
+	pending[auctionID] = nil
+	for i, id in ipairs(pendingOrder) do if id == auctionID then table.remove(pendingOrder, i); break end end
+	db.bought = (db.bought or 0) + 1
+	db.spent = (db.spent or 0) + p.price
+	msg(string.format("bought %s for %s  (session: %d for %s)", p.name, moneyText(p.price), db.bought, moneyText(db.spent)))
+	if win and win.refresh and win:IsShown() then win.refresh() end
+end
+
+local function fail(auctionID, why)
+	local p = pending[auctionID]
+	if not p then return end
+	pending[auctionID] = nil
+	for i, id in ipairs(pendingOrder) do if id == auctionID then table.remove(pendingOrder, i); break end end
+	msg("not bought: " .. p.name .. " (" .. tostring(why) .. ")")
+end
+
 local function buyNext()
 	if not ahOpen then msg("auction house is closed"); return end
-	if GetTime() - lastBuy < BUY_COOLDOWN then msg("too fast, click again"); return end
 	local r, why = pickNext()
 	if not r then msg(why); return end
 	local fits = wanted(r.itemID or r.name)
-	if not fits then msg("refusing: listing '" .. tostring(r.name) .. "' does not fit " .. presetLabel()); return end
+	if not fits then msg("refusing: listing '" .. tostring(r.name) .. "' does not fit " .. presetLabel()); table.remove(results, 1); return end
 	if r.price > cap() then msg("refusing: over cap"); return end
 	if GetMoney() < r.price then msg("not enough gold"); return end
 
@@ -392,53 +420,39 @@ local function buyNext()
 		if not sameName(name, targetName()) then msg("list moved under us - scan again"); return end
 		ok, err = pcall(PlaceAuctionBid, "list", r.id, r.price)
 	end
+	table.remove(results, 1)                       -- off the list either way; next click = next listing
 	if not ok then
-		local e = string.lower(tostring(err))
-		if string.find(e, "protected", 1, true) or string.find(e, "hardware", 1, true) or string.find(e, "secure", 1, true) then
-			batchLeft = 0
-			msg("this client only lets a real click buy - Buy 5 is off, use Buy 1")
-			return "protected"
-		end
-		msg("buy refused: " .. tostring(err) .. " - will retry when the AH is ready")
+		msg("refused by the AH: " .. tostring(err) .. " - skipping it")
 		return false
 	end
+	pending[r.id] = { price = r.price, name = r.name, itemID = r.itemID, money = GetMoney(), t = GetTime() }
+	pendingOrder[#pendingOrder + 1] = r.id
 	lastBuy = GetTime()
-	table.remove(results, 1)
-	db.bought = (db.bought or 0) + 1
-	db.spent = (db.spent or 0) + r.price
-	msg(string.format("bought 1 for %s  (session: %d for %s)", moneyText(r.price), db.bought, moneyText(db.spent)))
-	if currentPreset() and #results < 3 then
-		if queued < #queue then MAX_PREFETCH = queued + 3; prefetchNext()
-		elseif queued >= #queue and #results == 0 then msg("queue empty - Scan again for fresh listings") end
-	end
+	if currentPreset() and #results < 3 and queued < #queue then MAX_PREFETCH = queued + 3; prefetchNext() end
 	return true
 end
 
--- Batch: buy N, one per throttle window. Driven by AUCTION_HOUSE_THROTTLED_SYSTEM_READY,
--- with a timer fallback in case the event never comes.
-local batchFails = 0
-local function batchStep()
-	if batchLeft <= 0 or not ahOpen then batchLeft = 0; return end
-	local r = pickNext()
-	if not r then batchLeft = 0; msg("batch done: nothing left under cap"); return end
-	local res = buyNext()
-	if res == true then batchLeft = batchLeft - 1; batchFails = 0
-	elseif res == "protected" then return
-	else
-		batchFails = (batchFails or 0) + 1
-		if batchFails >= 3 then batchLeft = 0; msg("batch stopped: the AH kept refusing, try Buy 1"); return end
+-- gold left the bags: match it to the oldest pending order with that exact price
+local function onMoney()
+	if #pendingOrder == 0 then return end
+	local now = GetMoney()
+	for _, id in ipairs(pendingOrder) do
+		local p = pending[id]
+		if p and p.money - now == p.price then settle(id, "money"); return end
 	end
-	if batchLeft <= 0 then msg("batch done") end
-	if win and win.refresh and win:IsShown() then win.refresh() end
-	-- fallback: if the throttle-ready event does not arrive, poke again
-	if batchTimer then batchTimer:Cancel() end
-	if batchLeft > 0 then batchTimer = C_Timer.NewTimer(1.5, batchStep) end
+	-- prices may have stacked (two buys before one settled): settle oldest whose price fits the drop
+	local first = pending[pendingOrder[1]]
+	if first and first.money - now >= first.price then settle(pendingOrder[1], "money") end
 end
-local function buyBatch(n)
-	batchLeft = n
-	lastBuy = 0
-	batchStep()
-end
+
+-- pending orders that never settle: after 8 s call them failed, so the tally stays honest
+C_Timer.NewTicker(2, function()
+	local now = GetTime()
+	for i = #pendingOrder, 1, -1 do
+		local id = pendingOrder[i]; local p = pending[id]
+		if p and now - p.t > 8 then fail(id, "no confirmation from the server") end
+	end
+end)
 
 -- ---------------------------------------------------------------------------
 -- Bags: find the next target item to disenchant
@@ -715,12 +729,8 @@ scanBtn:SetSize(90, 24); scanBtn:SetPoint("TOPLEFT", 14, -184); scanBtn:SetText(
 scanBtn:SetScript("OnClick", scan)
 
 local buyBtn = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
-buyBtn:SetSize(70, 24); buyBtn:SetPoint("LEFT", scanBtn, "RIGHT", 8, 0); buyBtn:SetText("Buy 1")
-buyBtn:SetScript("OnClick", function() batchLeft = 0; buyNext(); win.refresh() end)
-
-local buy5Btn = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
-buy5Btn:SetSize(70, 24); buy5Btn:SetPoint("LEFT", buyBtn, "RIGHT", 8, 0); buy5Btn:SetText("Buy 5")
-buy5Btn:SetScript("OnClick", function() buyBatch(5) end)
+buyBtn:SetSize(150, 24); buyBtn:SetPoint("LEFT", scanBtn, "RIGHT", 8, 0); buyBtn:SetText("Buy next")
+buyBtn:SetScript("OnClick", function() buyNext(); win.refresh() end)
 
 -- Secure button: the only way an addon may cast. Macro text is rebuilt before each click
 -- (PreClick, out of combat) to point at the next glove in the bags.
@@ -785,8 +795,8 @@ function win.refresh()
 	matsLine:SetText("Mats this session: " .. matsText(db.mats) .. "\nAll time: " .. matsText(db.matsAll))
 	profitLine:SetText(profitText())
 	buyBtn:SetEnabled(ahOpen and under > 0)
-	buy5Btn:SetEnabled(ahOpen and under > 0)
-	buy5Btn:SetText(batchLeft > 0 and ("..." .. batchLeft) or "Buy 5")
+	local np = #pendingOrder
+	buyBtn:SetText(np > 0 and string.format("Buy next (%d confirming)", np) or "Buy next")
 	deBtn:SetEnabled(inBags > 0 and not InCombatLockdown())
 end
 win:SetScript("OnShow", win.refresh)
@@ -796,7 +806,7 @@ win:SetScript("OnShow", win.refresh)
 -- ---------------------------------------------------------------------------
 local f = CreateFrame("Frame")
 for _, e in ipairs({ "PLAYER_LOGIN", "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED", "BAG_UPDATE_DELAYED",
-	"ITEM_SEARCH_RESULTS_UPDATED", "AUCTION_ITEM_LIST_UPDATE", "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "CHAT_MSG_LOOT", "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" }) do
+	"ITEM_SEARCH_RESULTS_UPDATED", "AUCTION_ITEM_LIST_UPDATE", "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "CHAT_MSG_LOOT", "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED", "AUCTION_HOUSE_PURCHASE_COMPLETED", "AUCTION_HOUSE_SHOW_ERROR", "PLAYER_MONEY" }) do
 	pcall(f.RegisterEvent, f, e)
 end
 f:SetScript("OnEvent", function(_, event, arg1)
@@ -811,14 +821,19 @@ f:SetScript("OnEvent", function(_, event, arg1)
 		ahOpen = true
 		if db.autoOpen ~= false then win:Show() end
 	elseif event == "AUCTION_HOUSE_CLOSED" then
-		ahOpen = false; results = {}
+		ahOpen = false; results = {}; queue = {}
 	elseif event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" and hasNewAH then
 		onBrowse()
 	elseif event == "ITEM_SEARCH_RESULTS_UPDATED" and hasNewAH then
 		collectNew(arg1)
 	elseif event == "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" and hasNewAH then
-		if batchLeft > 0 then lastBuy = 0; batchStep()
-		elseif currentPreset() and not fetching then prefetchNext() end
+		if currentPreset() and not fetching then prefetchNext() end
+	elseif event == "AUCTION_HOUSE_PURCHASE_COMPLETED" then
+		if arg1 and pending[arg1] then settle(arg1, "event") end
+	elseif event == "PLAYER_MONEY" then
+		onMoney()
+	elseif event == "AUCTION_HOUSE_SHOW_ERROR" then
+		if #pendingOrder > 0 then fail(pendingOrder[#pendingOrder], "AH error " .. tostring(arg1)) end
 	elseif event == "AUCTION_ITEM_LIST_UPDATE" and hasOldAH and not hasNewAH then
 		collectOld()
 	end
