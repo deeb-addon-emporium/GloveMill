@@ -209,6 +209,7 @@ end
 
 -- preset mode state
 local queue, queued, fetching, browsePages, browseRetries = {}, 0, nil, 0, 0
+local selected, listOffset = nil, 0        -- picked item type, list scroll
 local MAX_PREFETCH = 40                -- item types pulled per scan, ALL up front; none during buying
 local prefetchNext                     -- forward
 
@@ -290,7 +291,7 @@ local function onPresetBrowse()
 				needRetry = true
 				if C_Item and C_Item.RequestLoadItemDataByID then pcall(C_Item.RequestLoadItemDataByID, key.itemID) end
 			elseif fits and r.minPrice and r.minPrice <= cap() and r.containsOwnerItem ~= true then
-				queue[#queue + 1] = { key = key, itemID = key.itemID, name = name, minPrice = r.minPrice }
+				queue[#queue + 1] = { key = key, itemID = key.itemID, name = name, minPrice = r.minPrice, qty = r.totalQuantity }
 			end
 		end
 	end
@@ -303,12 +304,21 @@ local function onPresetBrowse()
 	table.sort(queue, function(a, b) return a.minPrice < b.minPrice end)
 	if needRetry and browseRetries < 3 then
 		browseRetries = browseRetries + 1
-		C_Timer.After(1, onPresetBrowse)      -- item data arrived by then; rebuild the queue
+		C_Timer.After(1, onPresetBrowse)      -- item data arrived by then; rebuild the list
 	end
-	msg(string.format("%d item type(s) fit, cheapest %s - pulling listings", #queue, queue[1] and moneyText(queue[1].minPrice) or "-"))
-	queued = 0; fetching = nil; results = {}
-	prefetchNext()
-	if win and win:IsShown() then win.refresh() end
+	msg(string.format("%d item type(s) fit under %s - click one in the list", #queue, moneyText(cap())))
+	queued = 0; fetching = nil; results = {}; selected = nil; listOffset = 0
+	if win and win.refresh then win.refresh() end
+end
+
+-- the player picked an item type from the list: pull that one item's listings
+local function selectType(entry)
+	if not entry or not ahOpen then return end
+	results = {}; selected = entry; fetching = entry
+	local sorts = { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } }
+	local ok, err = pcall(C_AuctionHouse.SendSearchQuery, entry.key, sorts, false)
+	if not ok then fetching = nil; msg("search refused: " .. tostring(err)) else msg("pulling " .. entry.name .. "...") end
+	if win and win.refresh then win.refresh() end
 end
 
 local function onBrowse()
@@ -334,17 +344,12 @@ end
 local function collectNew(itemKey)
 	if currentPreset() then
 		if fetching and (not itemKey or itemKey.itemID == fetching.itemID) then
+			results = {}
 			collectKey(fetching)
-			queued = queued + 1
 			fetching = nil
-			if queued >= math.min(#queue, MAX_PREFETCH) then
-				msg(string.format("ready: %d listings under cap across %d item types - click Buy next", #results, queued))
-			else
-				C_Timer.After(0.3, prefetchNext)
-			end
-		elseif itemKey and itemKey.itemID then
-			-- the AH re-sends this item's results after a buy: drop listings that vanished,
-			-- never add or reorder (no re-scan between buys, by design)
+			msg(string.format("%s: %d listing(s) under cap - click Buy next", selected and selected.name or "?", #results))
+		elseif itemKey and selected and itemKey.itemID == selected.itemID then
+			-- the AH re-sends this item's results after a buy: drop listings that vanished
 			local alive = {}
 			local n = C_AuctionHouse.GetNumItemSearchResults(itemKey) or 0
 			for i = 1, n do
@@ -353,7 +358,7 @@ local function collectNew(itemKey)
 			end
 			for i = #results, 1, -1 do
 				local row = results[i]
-				if row.itemID == itemKey.itemID and not alive[row.id] and not pending[row.id] then table.remove(results, i) end
+				if not alive[row.id] and not pending[row.id] then table.remove(results, i) end
 			end
 		end
 		return
@@ -440,6 +445,7 @@ local function buyNext()
 		ok, err = pcall(PlaceAuctionBid, "list", r.id, r.price)
 	end
 	table.remove(results, 1)                       -- off the list either way; next click = next listing
+	if #results == 0 and currentPreset() then msg("that was the last " .. tostring(r.name) .. " under cap - pick the next type") end
 	if not ok then
 		msg("refused by the AH: " .. tostring(err) .. " - skipping it")
 		return false
@@ -694,7 +700,7 @@ end
 -- Window
 -- ---------------------------------------------------------------------------
 local win = CreateFrame("Frame", "GloveMillFrame", UIParent, "BasicFrameTemplateWithInset")
-win:SetSize(320, 411)
+win:SetSize(320, 411 + 136)
 win:SetPoint("CENTER", 300, 0)
 win:SetMovable(true); win:EnableMouse(true); win:RegisterForDrag("LeftButton")
 win:SetScript("OnDragStart", win.StartMoving)
@@ -762,8 +768,31 @@ local status = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 status:SetPoint("TOPLEFT", 14, -130)
 status:SetWidth(290); status:SetJustifyH("LEFT"); status:SetHeight(50)
 
+-- item type list (preset mode): click a row to pull that item's listings
+local LIST_ROWS, LIST_ROW_H = 8, 16
+local listFrame = CreateFrame("Frame", nil, win)
+listFrame:SetPoint("TOPLEFT", 14, -180); listFrame:SetSize(292, LIST_ROWS * LIST_ROW_H)
+listFrame:EnableMouseWheel(true)
+local listRows = {}
+for i = 1, LIST_ROWS do
+	local b = CreateFrame("Button", nil, listFrame)
+	b:SetSize(292, LIST_ROW_H); b:SetPoint("TOPLEFT", 0, -(i - 1) * LIST_ROW_H)
+	b.bg = b:CreateTexture(nil, "BACKGROUND"); b.bg:SetAllPoints(); b.bg:SetColorTexture(1, 1, 1, 0.06)
+	b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+	b.name = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); b.name:SetPoint("LEFT", 4, 0); b.name:SetWidth(170); b.name:SetJustifyH("LEFT")
+	b.price = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); b.price:SetPoint("RIGHT", -4, 0); b.price:SetWidth(112); b.price:SetJustifyH("RIGHT")
+	b:SetScript("OnClick", function(self) if self.entry then selectType(self.entry); win.refresh() end end)
+	listRows[i] = b
+end
+listFrame:SetScript("OnMouseWheel", function(_, delta)
+	listOffset = math.max(0, math.min(listOffset - delta, math.max(0, #queue - LIST_ROWS)))
+	win.refresh()
+end)
+local listHint = listFrame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+listHint:SetPoint("TOPLEFT", 4, -2); listHint:SetWidth(284); listHint:SetJustifyH("LEFT")
+
 local scanBtn = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
-scanBtn:SetSize(90, 24); scanBtn:SetPoint("TOPLEFT", 14, -184); scanBtn:SetText("Scan AH")
+scanBtn:SetSize(90, 24); scanBtn:SetPoint("TOPLEFT", 14, -320); scanBtn:SetText("Scan AH")
 scanBtn:SetScript("OnClick", scan)
 
 local buyBtn = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
@@ -773,7 +802,7 @@ buyBtn:SetScript("OnClick", function() buyNext(); win.refresh() end)
 -- Secure button: the only way an addon may cast. Macro text is rebuilt before each click
 -- (PreClick, out of combat) to point at the next glove in the bags.
 local deBtn = CreateFrame("Button", "GloveMillDEButton", win, "SecureActionButtonTemplate,UIPanelButtonTemplate")
-deBtn:SetSize(218, 28); deBtn:SetPoint("TOPLEFT", 14, -218); deBtn:SetText("Disenchant next")
+deBtn:SetSize(218, 28); deBtn:SetPoint("TOPLEFT", 14, -354); deBtn:SetText("Disenchant next")
 deBtn:RegisterForClicks("AnyUp", "AnyDown")
 deBtn:SetAttribute("type", "macro")
 deBtn:SetScript("PreClick", function(self)
@@ -790,13 +819,13 @@ end)
 deBtn:SetScript("PostClick", function() C_Timer.After(0.5, function() win.refresh() end) end)
 
 local deTarget = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-deTarget:SetPoint("TOPLEFT", 14, -250); deTarget:SetWidth(290); deTarget:SetJustifyH("LEFT")
+deTarget:SetPoint("TOPLEFT", 14, -386); deTarget:SetWidth(290); deTarget:SetJustifyH("LEFT")
 
 local matsLine = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-matsLine:SetPoint("TOPLEFT", 14, -272); matsLine:SetWidth(290); matsLine:SetJustifyH("LEFT"); matsLine:SetHeight(48)
+matsLine:SetPoint("TOPLEFT", 14, -408); matsLine:SetWidth(290); matsLine:SetJustifyH("LEFT"); matsLine:SetHeight(48)
 
 local profitLine = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-profitLine:SetPoint("TOPLEFT", 14, -322); profitLine:SetWidth(290); profitLine:SetJustifyH("LEFT"); profitLine:SetHeight(30)
+profitLine:SetPoint("TOPLEFT", 14, -458); profitLine:SetWidth(290); profitLine:SetJustifyH("LEFT"); profitLine:SetHeight(30)
 
 local hint = win:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 hint:SetPoint("BOTTOMLEFT", 14, 12); hint:SetWidth(290); hint:SetJustifyH("LEFT")
@@ -836,10 +865,29 @@ function win.refresh()
 	else
 		deTarget:SetText("|cff808080DE target: nothing in bags fits|r")
 	end
+	-- item type list
+	if p then
+		listFrame:Show()
+		if #queue == 0 then
+			listHint:SetText("Scan to list item types here"); listHint:Show()
+		else listHint:Hide() end
+		for i, b in ipairs(listRows) do
+			local e = queue[i + listOffset]
+			b.entry = e
+			if e then
+				local _, ilvl = itemFacts(e.itemID)
+				b.name:SetText(string.format("%s%s|r  |cff808080%s|r", selected == e and "|cffffd080" or "", e.name, ilvl and ("i" .. ilvl) or ""))
+				b.price:SetText(moneyText(e.minPrice) .. (e.qty and ("  x" .. e.qty) or ""))
+				b.bg:SetColorTexture(1, 1, 1, selected == e and 0.18 or ((i %% 2 == 0) and 0.06 or 0.03))
+				b:Show()
+			else b:Hide() end
+		end
+	else
+		listFrame:Hide()
+	end
 	local qtext = ""
 	if p then
-		local total = math.min(#queue, MAX_PREFETCH)
-		qtext = (queued < total or fetching) and string.format("   pulling %d/%d...", queued, total) or string.format("   %d item types, all pulled", total)
+		qtext = selected and ("   picked: " .. selected.name .. (fetching and " (pulling...)" or "")) or "   pick an item type"
 	end
 	status:SetText(string.format("AH: %s   listings: %d   under cap: %d   cheapest: %s%s\nIn bags: %d   bought this session: %d for %s",
 		ahOpen and "open" or "closed", #results, under, cheapest, qtext, inBags, db.bought or 0, moneyText(db.spent or 0)))
@@ -878,7 +926,7 @@ f:SetScript("OnEvent", function(_, event, arg1)
 	elseif event == "ITEM_SEARCH_RESULTS_UPDATED" and hasNewAH then
 		collectNew(arg1)
 	elseif event == "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" and hasNewAH then
-		if currentPreset() and not fetching then prefetchNext() end
+		-- nothing queued automatically any more; the player picks item types
 	elseif event == "AUCTION_HOUSE_PURCHASE_COMPLETED" then
 		if arg1 and pending[arg1] then settle(arg1, "event") end
 	elseif event == "PLAYER_MONEY" then
