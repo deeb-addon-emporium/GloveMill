@@ -1,6 +1,6 @@
 ## Interface: 16001
 ## Title: GloveMill
 ## Notes: Buys any item you name under a price cap (one per click), disenchants it (one per click), tallies the mats and assumed profit. Minimap button; /gm config.
-## Version: 1.9
+## Version: 1.10
 ## SavedVariables: GloveMillDB
 GloveMill.lua

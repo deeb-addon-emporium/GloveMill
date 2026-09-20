@@ -195,7 +195,7 @@ end
 
 -- preset mode state
 local queue, queued, fetching, browsePages, browseRetries = {}, 0, nil, 0, 0
-local MAX_PREFETCH = 6                 -- item searches per scan; each one is a throttled call
+local MAX_PREFETCH = 40                -- item types pulled per scan, ALL up front; none during buying
 local prefetchNext                     -- forward
 
 local function scan()
@@ -323,7 +323,11 @@ local function collectNew(itemKey)
 			collectKey(fetching)
 			queued = queued + 1
 			fetching = nil
-			C_Timer.After(0.3, prefetchNext)
+			if queued >= math.min(#queue, MAX_PREFETCH) then
+				msg(string.format("ready: %d listings under cap across %d item types - click Buy next", #results, queued))
+			else
+				C_Timer.After(0.3, prefetchNext)
+			end
 		elseif itemKey and itemKey.itemID then
 			-- the AH re-sends this item's results after a buy: drop listings that vanished,
 			-- never add or reorder (no re-scan between buys, by design)
@@ -429,7 +433,7 @@ local function buyNext()
 	pending[r.id] = { price = r.price, name = r.name, itemID = r.itemID, money = GetMoney(), t = GetTime() }
 	pendingOrder[#pendingOrder + 1] = r.id
 	lastBuy = GetTime()
-	if currentPreset() and #results < 3 and queued < #queue then MAX_PREFETCH = queued + 3; prefetchNext() end
+	-- no pulls during buying: everything was pulled at scan time
 	return true
 end
 
@@ -818,7 +822,11 @@ function win.refresh()
 	else
 		deTarget:SetText("|cff808080DE target: nothing in bags fits|r")
 	end
-	local qtext = p and string.format("   item types: %d (%d pulled)", #queue, queued) or ""
+	local qtext = ""
+	if p then
+		local total = math.min(#queue, MAX_PREFETCH)
+		qtext = (queued < total or fetching) and string.format("   pulling %d/%d...", queued, total) or string.format("   %d item types, all pulled", total)
+	end
 	status:SetText(string.format("AH: %s   listings: %d   under cap: %d   cheapest: %s%s\nIn bags: %d   bought this session: %d for %s",
 		ahOpen and "open" or "closed", #results, under, cheapest, qtext, inBags, db.bought or 0, moneyText(db.spent or 0)))
 	matsLine:SetText("Mats this session: " .. matsText(db.mats) .. "\nAll time: " .. matsText(db.matsAll))
