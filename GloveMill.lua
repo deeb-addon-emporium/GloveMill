@@ -351,8 +351,12 @@ local function collectNew(itemKey)
 		if fetching and (not itemKey or itemKey.itemID == fetching.itemID) then
 			results = {}
 			collectKey(fetching)
+			table.sort(results, function(a, b) return a.price < b.price end)
+			fetching.pulledMin = results[1] and results[1].price or nil
+			fetching.pulledCount = #results
 			fetching = nil
-			msg(string.format("%s: %d listing(s) under cap - click Buy next", selected and selected.name or "?", #results))
+			msg(string.format("%s: %d buyout(s) under cap, cheapest %s - click Buy next",
+				selected and selected.name or "?", #results, results[1] and moneyText(results[1].price) or "-"))
 		elseif itemKey and selected and itemKey.itemID == selected.itemID then
 			-- the AH re-sends this item's results after a buy: drop listings that vanished
 			local alive = {}
@@ -450,6 +454,7 @@ local function buyNext()
 		ok, err = pcall(PlaceAuctionBid, "list", r.id, r.price)
 	end
 	table.remove(results, 1)                       -- off the list either way; next click = next listing
+	if selected then selected.pulledCount = #results; selected.pulledMin = results[1] and results[1].price or nil end
 	if #results == 0 and currentPreset() then msg("no more " .. tostring(r.name) .. " under cap - pick another row (or click this one again to re-check)") end
 	if not ok then
 		msg("refused by the AH: " .. tostring(err) .. " - skipping it")
@@ -882,7 +887,11 @@ function win.refresh()
 			if e then
 				local _, ilvl = itemFacts(e.itemID)
 				b.name:SetText(string.format("%s%s|r  |cff808080%s|r", selected == e and "|cffffd080" or "", e.name, ilvl and ("i" .. ilvl) or ""))
-				b.price:SetText("from " .. moneyText(e.minPrice) .. (e.qty and ("  |cff808080" .. e.qty .. " listed|r") or ""))
+				if e.pulledCount ~= nil then
+					b.price:SetText((e.pulledMin and ("buyout " .. moneyText(e.pulledMin)) or "|cffff8080none|r") .. "  |cff808080" .. e.pulledCount .. " under cap|r")
+				else
+					b.price:SetText("|cff808080bid/buyout from|r " .. moneyText(e.minPrice) .. (e.qty and ("  |cff808080" .. e.qty .. " listed|r") or ""))
+				end
 				b.bg:SetColorTexture(1, 1, 1, selected == e and 0.18 or ((i % 2 == 0) and 0.06 or 0.03))
 				b:Show()
 			else b:Hide() end
