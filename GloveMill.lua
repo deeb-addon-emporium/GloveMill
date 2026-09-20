@@ -699,7 +699,7 @@ win:SetPoint("CENTER", 300, 0)
 win:SetMovable(true); win:EnableMouse(true); win:RegisterForDrag("LeftButton")
 win:SetScript("OnDragStart", win.StartMoving)
 win:SetScript("OnDragStop", win.StopMovingOrSizing)
-win:SetFrameStrata("DIALOG")
+win:SetFrameStrata("MEDIUM")   -- below loot and other popups
 win:Hide()
 if win.TitleText then win.TitleText:SetText("GloveMill") end
 tinsert(UISpecialFrames, "GloveMillFrame")
