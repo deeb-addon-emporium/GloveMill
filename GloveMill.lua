@@ -878,7 +878,7 @@ function win.refresh()
 				local _, ilvl = itemFacts(e.itemID)
 				b.name:SetText(string.format("%s%s|r  |cff808080%s|r", selected == e and "|cffffd080" or "", e.name, ilvl and ("i" .. ilvl) or ""))
 				b.price:SetText(moneyText(e.minPrice) .. (e.qty and ("  x" .. e.qty) or ""))
-				b.bg:SetColorTexture(1, 1, 1, selected == e and 0.18 or ((i %% 2 == 0) and 0.06 or 0.03))
+				b.bg:SetColorTexture(1, 1, 1, selected == e and 0.18 or ((i % 2 == 0) and 0.06 or 0.03))
 				b:Show()
 			else b:Hide() end
 		end

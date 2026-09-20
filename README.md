@@ -16,4 +16,4 @@ Part of [Deeb's Addon Emporium](https://github.com/deeb-addon-emporium/emporium)
 Download the zip from the latest release and drop the `GloveMill` folder into
 `World of Warcraft/_classic_beta_/Interface/AddOns/`.
 
-Current version: 1.13
+Current version: 1.14
