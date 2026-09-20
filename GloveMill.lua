@@ -166,6 +166,7 @@ local hasNewAH = type(C_AuctionHouse) == "table" and type(C_AuctionHouse.SendSea
 local hasOldAH = type(QueryAuctionItems) == "function"
 
 local results = {}         -- { price=, count=, id=<auctionID or list index>, name= }
+local lastNote = nil
 local pending = {}         -- auctionID -> order waiting for the server to confirm
 local lastBuy = 0
 local ahOpen = false
@@ -462,30 +463,49 @@ local GetItemInfoAt = (C_Container and C_Container.GetContainerItemInfo) or nil
 local GetItemLinkAt = (C_Container and C_Container.GetContainerItemLink) or GetContainerItemLink
 local MAX_BAG = (NUM_BAG_SLOTS or 4)
 
+-- Is this bag slot bound to you? Bound gear in bags is usually YOUR gear, not shuffle stock.
+local function slotBound(bag, slot)
+	if not (ItemLocation and ItemLocation.CreateFromBagAndSlot and C_Item and C_Item.IsBound) then return false end
+	local ok, loc = pcall(ItemLocation.CreateFromBagAndSlot, bag, slot)
+	if not ok or not loc then return false end
+	local ok2, bound = pcall(C_Item.IsBound, loc)
+	return ok2 and bound == true
+end
+
+-- What the DE button would hit next. Preset mode: every GREEN bag item fitting the bracket
+-- (never blue/purple, never soulbound unless you turn that off). Item mode: exact name.
+-- Returns count, bag, slot, name, ilvl of the first one.
 local function bagCount()
-	local n, bag, slot = 0, nil, nil
+	local n, bag, slot, firstName, firstIlvl = 0, nil, nil, nil, nil
 	local id = itemIDForTarget()
+	local p = currentPreset()
 	for b = 0, MAX_BAG do
-		for s = 1, (GetNumSlots(b) or 0) do
-			local hit = false
+		for sl = 1, (GetNumSlots(b) or 0) do
+			local hit, name, ilvl = false, nil, nil
 			if GetItemInfoAt then
-				local info = GetItemInfoAt(b, s)
+				local info = GetItemInfoAt(b, sl)
 				if info and not info.isLocked then
-					if currentPreset() then hit = wanted(info.itemID) == true
-					elseif id and info.itemID == id then hit = true end
+					if p then
+						local q
+						name, ilvl, q = itemFacts(info.itemID)
+						hit = wanted(info.itemID) == true and q == UNCOMMON
+					elseif id and info.itemID == id then
+						hit = true; name, ilvl = itemFacts(info.itemID)
+					end
+					if hit and db.deSkipBound ~= false and slotBound(b, sl) then hit = false end
 				end
 			end
-			if not hit and not currentPreset() and GetItemLinkAt then
-				local link = GetItemLinkAt(b, s)
-				if link and string.find(link, "%[" .. targetName() .. "%]") then hit = true end
+			if not hit and not p and GetItemLinkAt then
+				local link = GetItemLinkAt(b, sl)
+				if link and string.find(link, "%[" .. targetName() .. "%]") then hit = true; name = targetName() end
 			end
 			if hit then
-				n = n + (1)
-				if not bag then bag, slot = b, s end
+				n = n + 1
+				if not bag then bag, slot, firstName, firstIlvl = b, sl, name, ilvl end
 			end
 		end
 	end
-	return n, bag, slot
+	return n, bag, slot, firstName, firstIlvl
 end
 
 -- ---------------------------------------------------------------------------
@@ -656,7 +676,7 @@ end
 -- Window
 -- ---------------------------------------------------------------------------
 local win = CreateFrame("Frame", "GloveMillFrame", UIParent, "BasicFrameTemplateWithInset")
-win:SetSize(320, 393)
+win:SetSize(320, 411)
 win:SetPoint("CENTER", 300, 0)
 win:SetMovable(true); win:EnableMouse(true); win:RegisterForDrag("LeftButton")
 win:SetScript("OnDragStart", win.StartMoving)
@@ -740,21 +760,25 @@ deBtn:RegisterForClicks("AnyUp", "AnyDown")
 deBtn:SetAttribute("type", "macro")
 deBtn:SetScript("PreClick", function(self)
 	if InCombatLockdown() then return end
-	local n, bag, slot = bagCount()
+	local n, bag, slot, name = bagCount()
 	if not bag then
 		self:SetAttribute("macrotext", "")
-		msg("no " .. targetName() .. " in your bags")
+		msg("nothing in your bags fits " .. presetLabel())
 		return
 	end
 	self:SetAttribute("macrotext", string.format("/cast Disenchant\n/use %d %d", bag, slot))
+	lastNote = "DE: " .. tostring(name)
 end)
 deBtn:SetScript("PostClick", function() C_Timer.After(0.5, function() win.refresh() end) end)
 
+local deTarget = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+deTarget:SetPoint("TOPLEFT", 14, -250); deTarget:SetWidth(290); deTarget:SetJustifyH("LEFT")
+
 local matsLine = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-matsLine:SetPoint("TOPLEFT", 14, -254); matsLine:SetWidth(290); matsLine:SetJustifyH("LEFT"); matsLine:SetHeight(48)
+matsLine:SetPoint("TOPLEFT", 14, -272); matsLine:SetWidth(290); matsLine:SetJustifyH("LEFT"); matsLine:SetHeight(48)
 
 local profitLine = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-profitLine:SetPoint("TOPLEFT", 14, -304); profitLine:SetWidth(290); profitLine:SetJustifyH("LEFT"); profitLine:SetHeight(30)
+profitLine:SetPoint("TOPLEFT", 14, -322); profitLine:SetWidth(290); profitLine:SetJustifyH("LEFT"); profitLine:SetHeight(30)
 
 local hint = win:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 hint:SetPoint("BOTTOMLEFT", 14, 12); hint:SetWidth(290); hint:SetJustifyH("LEFT")
@@ -788,7 +812,12 @@ function win.refresh()
 	local under = 0
 	for _, r in ipairs(results) do if r.price <= cap() then under = under + 1 end end
 	local cheapest = results[1] and moneyText(results[1].price) or "-"
-	local inBags = bagCount()
+	local inBags, _, _, nextName, nextIlvl = bagCount()
+	if nextName then
+		deTarget:SetText(string.format("|cffffd080DE target:|r %s (ilvl %s)   %d in bags", nextName, tostring(nextIlvl or "?"), inBags))
+	else
+		deTarget:SetText("|cff808080DE target: nothing in bags fits|r")
+	end
 	local qtext = p and string.format("   item types: %d (%d pulled)", #queue, queued) or ""
 	status:SetText(string.format("AH: %s   listings: %d   under cap: %d   cheapest: %s%s\nIn bags: %d   bought this session: %d for %s",
 		ahOpen and "open" or "closed", #results, under, cheapest, qtext, inBags, db.bought or 0, moneyText(db.spent or 0)))
@@ -893,7 +922,7 @@ end
 --   drag         move around the minimap (saved)
 -- ---------------------------------------------------------------------------
 local cfg = CreateFrame("Frame", "GloveMillConfig", UIParent, "BasicFrameTemplateWithInset")
-cfg:SetSize(300, 230)
+cfg:SetSize(300, 258)
 cfg:SetPoint("CENTER", -100, 0)
 cfg:SetMovable(true); cfg:EnableMouse(true); cfg:RegisterForDrag("LeftButton")
 cfg:SetScript("OnDragStart", cfg.StartMoving)
@@ -923,6 +952,7 @@ capBox2:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 
 local rows = {
 	{ label = "Open the window when the AH opens", get = function() return db.autoOpen ~= false end,  set = function(v) db.autoOpen = v end },
+	{ label = "Never disenchant soulbound items",   get = function() return db.deSkipBound ~= false end, set = function(v) db.deSkipBound = v end },
 	{ label = "Count disenchant mats I loot",       get = function() return db.countMats ~= false end, set = function(v) db.countMats = v end },
 	{ label = "Expected DE line on item tooltips",  get = function() return db.tooltip ~= false end,  set = function(v) db.tooltip = v end },
 	{ label = "Show the minimap button",            get = function() return db.minimap ~= false end,   set = function(v) db.minimap = v; if GloveMillMinimapButton then GloveMillMinimapButton:SetShown(v) end end },
