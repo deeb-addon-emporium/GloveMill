@@ -210,6 +210,7 @@ end
 -- preset mode state
 local queue, queued, fetching, browsePages, browseRetries = {}, 0, nil, 0, 0
 local selected, listOffset = nil, 0        -- picked item type, list scroll
+local scanning = false                      -- true between Scan and the list being built
 local MAX_PREFETCH = 40                -- item types pulled per scan, ALL up front; none during buying
 local prefetchNext                     -- forward
 
@@ -219,6 +220,7 @@ local function scan()
 	local p = currentPreset()
 	if p then
 		if not hasNewAH then msg("presets need the new auction house API"); return end
+		scanning = true; selected = nil
 		local q = {
 			searchString = "",
 			sorts = { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } },
@@ -279,6 +281,7 @@ end
 local function onPresetBrowse()
 	local p = currentPreset()
 	if not p then return end
+	if not scanning then return end            -- the AH re-sends browse results after buys: ignore
 	local list = C_AuctionHouse.GetBrowseResults and C_AuctionHouse.GetBrowseResults() or {}
 	local seen, needRetry = {}, false
 	queue = {}
@@ -305,6 +308,8 @@ local function onPresetBrowse()
 	if needRetry and browseRetries < 3 then
 		browseRetries = browseRetries + 1
 		C_Timer.After(1, onPresetBrowse)      -- item data arrived by then; rebuild the list
+	else
+		scanning = false                      -- list is final; later browse updates are ignored
 	end
 	msg(string.format("%d item type(s) fit under %s - click one in the list", #queue, moneyText(cap())))
 	queued = 0; fetching = nil; results = {}; selected = nil; listOffset = 0
@@ -445,7 +450,7 @@ local function buyNext()
 		ok, err = pcall(PlaceAuctionBid, "list", r.id, r.price)
 	end
 	table.remove(results, 1)                       -- off the list either way; next click = next listing
-	if #results == 0 and currentPreset() then msg("that was the last " .. tostring(r.name) .. " under cap - pick the next type") end
+	if #results == 0 and currentPreset() then msg("no more " .. tostring(r.name) .. " under cap - pick another row (or click this one again to re-check)") end
 	if not ok then
 		msg("refused by the AH: " .. tostring(err) .. " - skipping it")
 		return false
@@ -779,8 +784,8 @@ for i = 1, LIST_ROWS do
 	b:SetSize(292, LIST_ROW_H); b:SetPoint("TOPLEFT", 0, -(i - 1) * LIST_ROW_H)
 	b.bg = b:CreateTexture(nil, "BACKGROUND"); b.bg:SetAllPoints(); b.bg:SetColorTexture(1, 1, 1, 0.06)
 	b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
-	b.name = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); b.name:SetPoint("LEFT", 4, 0); b.name:SetWidth(170); b.name:SetJustifyH("LEFT")
-	b.price = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); b.price:SetPoint("RIGHT", -4, 0); b.price:SetWidth(112); b.price:SetJustifyH("RIGHT")
+	b.name = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); b.name:SetPoint("LEFT", 4, 0); b.name:SetWidth(148); b.name:SetJustifyH("LEFT")
+	b.price = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); b.price:SetPoint("RIGHT", -4, 0); b.price:SetWidth(140); b.price:SetJustifyH("RIGHT")
 	b:SetScript("OnClick", function(self) if self.entry then selectType(self.entry); win.refresh() end end)
 	listRows[i] = b
 end
@@ -877,7 +882,7 @@ function win.refresh()
 			if e then
 				local _, ilvl = itemFacts(e.itemID)
 				b.name:SetText(string.format("%s%s|r  |cff808080%s|r", selected == e and "|cffffd080" or "", e.name, ilvl and ("i" .. ilvl) or ""))
-				b.price:SetText(moneyText(e.minPrice) .. (e.qty and ("  x" .. e.qty) or ""))
+				b.price:SetText("from " .. moneyText(e.minPrice) .. (e.qty and ("  |cff808080" .. e.qty .. " listed|r") or ""))
 				b.bg:SetColorTexture(1, 1, 1, selected == e and 0.18 or ((i % 2 == 0) and 0.06 or 0.03))
 				b:Show()
 			else b:Hide() end
