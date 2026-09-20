@@ -42,7 +42,21 @@ local function parseMoney(s)
 end
 
 local function targetName() return db.item or DEFAULT_ITEM end
-local function cap() return db.cap or DEFAULT_CAP end
+local function capKey()
+	local k = db and db.preset or "item"
+	if k == "item" then return "item:" .. string.lower(db and db.item or DEFAULT_ITEM) end
+	return k
+end
+local function cap()
+	local caps = db and db.caps
+	local c = caps and caps[capKey()]
+	return c or (db and db.cap) or DEFAULT_CAP
+end
+local function setCap(c)
+	db.caps = db.caps or {}
+	db.caps[capKey()] = c
+	db.cap = c
+end
 
 local function sameName(a, b)
 	return type(a) == "string" and type(b) == "string" and string.lower(a) == string.lower(b)
@@ -738,7 +752,7 @@ capBox:SetPoint("LEFT", capLabel, "RIGHT", 10, 0)
 capBox:SetAutoFocus(false)
 capBox:SetScript("OnEnterPressed", function(self)
 	local c = parseMoney(self:GetText())
-	if c then db.cap = c; msg("cap is now " .. moneyText(c)) else msg("could not read that, try 2g50s") end
+	if c then setCap(c); msg("cap for " .. presetLabel() .. " is now " .. moneyText(c)) else msg("could not read that, try 2g50s") end
 	self:ClearFocus()
 	win.refresh()
 end)
@@ -883,7 +897,7 @@ SlashCmdList.GLOVEMILL = function(input)
 	local cmd, rest = string.match(input, "^(%S+)%s*(.*)$")
 	if cmd == "cap" then
 		local c = parseMoney(rest)
-		if c then db.cap = c; msg("cap is now " .. moneyText(c)) else msg("say it like: /gm cap 2g50s") end
+		if c then setCap(c); msg("cap for " .. presetLabel() .. " is now " .. moneyText(c)) else msg("say it like: /gm cap 2g50s") end
 	elseif cmd == "exclude" and rest ~= "" then
 		local name = string.lower(string.match(rest, "%[(.-)%]") or rest)
 		db.exclude = db.exclude or {}; db.exclude[name] = true; results = {}
