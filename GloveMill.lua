@@ -278,6 +278,18 @@ prefetchNext = function()
 	if not ok then fetching = nil end   -- throttled: AUCTION_HOUSE_THROTTLED_SYSTEM_READY retries
 end
 
+-- cheapest first: a pulled row sorts by its real cheapest buyout, an unpulled one by the AH's
+-- bid-or-buyout floor; ties go to the row with more listed, then by name
+local function sortQueue()
+	table.sort(queue, function(a, b)
+		local pa = a.pulledMin or a.minPrice or 0
+		local pb = b.pulledMin or b.minPrice or 0
+		if pa ~= pb then return pa < pb end
+		if (a.qty or 0) ~= (b.qty or 0) then return (a.qty or 0) > (b.qty or 0) end
+		return (a.name or "") < (b.name or "")
+	end)
+end
+
 local function onPresetBrowse()
 	local p = currentPreset()
 	if not p then return end
@@ -314,18 +326,6 @@ local function onPresetBrowse()
 	msg(string.format("%d item type(s) fit under %s - click one in the list", #queue, moneyText(cap())))
 	queued = 0; fetching = nil; results = {}; selected = nil; listOffset = 0
 	if win and win.refresh then win.refresh() end
-end
-
--- cheapest first: a pulled row sorts by its real cheapest buyout, an unpulled one by the AH's
--- bid-or-buyout floor; ties go to the row with more listed, then by name
-local function sortQueue()
-	table.sort(queue, function(a, b)
-		local pa = a.pulledMin or a.minPrice or 0
-		local pb = b.pulledMin or b.minPrice or 0
-		if pa ~= pb then return pa < pb end
-		if (a.qty or 0) ~= (b.qty or 0) then return (a.qty or 0) > (b.qty or 0) end
-		return (a.name or "") < (b.name or "")
-	end)
 end
 
 -- the player picked an item type from the list: pull that one item's listings
