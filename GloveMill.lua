@@ -998,6 +998,15 @@ SlashCmdList.GLOVEMILL = function(input)
 		for _, p in ipairs(PRESETS) do if p.key == rest then found = p end end
 		if found then db.preset = found.key; results = {}; queue = {}; msg("preset: " .. found.label)
 		else msg("presets: " .. (function() local t = {} for _, p in ipairs(PRESETS) do t[#t+1] = p.key end return table.concat(t, " ") end)()) end
+	elseif cmd == "probe" then
+		local e = queue[1]
+		if not e then msg("probe: the list is empty - Scan first"); return end
+		local sec = issecretvalue and issecretvalue(e.minPrice)
+		local secq = issecretvalue and issecretvalue(e.qty)
+		msg(string.format("probe: %d rows. first=%s minPrice secret=%s (%s) qty secret=%s sortPrice=%s",
+			#queue, tostring(e.name), tostring(sec), tostring(e.minPrice), tostring(secq), tostring(e.sortPrice)))
+		local ok, err = pcall(function() return e.minPrice < 1 end)
+		msg("probe: comparing minPrice " .. (ok and "works" or ("throws: " .. tostring(err))))
 	elseif cmd == "mats" then
 		msg("this session: " .. matsText(db.mats))
 		msg("all time: " .. matsText(db.matsAll))
