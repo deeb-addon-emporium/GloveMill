@@ -278,16 +278,23 @@ prefetchNext = function()
 	if not ok then fetching = nil end   -- throttled: AUCTION_HOUSE_THROTTLED_SYSTEM_READY retries
 end
 
--- cheapest first: a pulled row sorts by its real cheapest buyout, an unpulled one by the AH's
--- bid-or-buyout floor; ties go to the row with more listed, then by name
+-- cheapest first. Secret values (12.x) can be shown but never compared, so only numbers
+-- that pass the secret check take part; anything else sorts last. The sort itself is
+-- pcall'd: a comparator that throws would otherwise leave the list in AH (alphabetical) order.
+local function plainNum(v)
+	if type(v) ~= "number" then return nil end
+	if issecretvalue and issecretvalue(v) then return nil end
+	return v
+end
 local function sortQueue()
-	table.sort(queue, function(a, b)
-		local pa = a.pulledMin or a.minPrice or 0
-		local pb = b.pulledMin or b.minPrice or 0
-		if pa ~= pb then return pa < pb end
-		if (a.qty or 0) ~= (b.qty or 0) then return (a.qty or 0) > (b.qty or 0) end
+	for _, e in ipairs(queue) do
+		e.sortPrice = plainNum(e.pulledMin) or plainNum(e.minPrice) or math.huge
+	end
+	local ok = pcall(table.sort, queue, function(a, b)
+		if a.sortPrice ~= b.sortPrice then return a.sortPrice < b.sortPrice end
 		return (a.name or "") < (b.name or "")
 	end)
+	if not ok then msg("could not sort the list (secret prices?)") end
 end
 
 local function onPresetBrowse()
