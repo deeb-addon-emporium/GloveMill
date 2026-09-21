@@ -947,7 +947,15 @@ f:SetScript("OnEvent", function(_, event, arg1)
 		onLoot(arg1)
 		return
 	elseif event == "PLAYER_LOGIN" then
+		if type(GloveMillDB) ~= "table" then GloveMillDB = {} end
+		if not GloveMillDB._saved and type(GloveMillMirror) == "table" and GloveMillMirror._saved then
+			for k, v in pairs(GloveMillMirror) do GloveMillDB[k] = v end
+			C_Timer.After(4, function() msg("|cffff8080settings came up empty|r - restored from this character's mirror") end)
+		elseif not GloveMillDB._saved then
+			C_Timer.After(4, function() msg("fresh settings (first run, or they were reset)") end)
+		end
 		db = GloveMillDB
+		db._saved = time()
 		db.bought, db.spent, db.mats, db.listed, db.listedCount, db.listedMats = 0, 0, {}, 0, 0, {}
 		msg("loaded - /gm for the window. " .. (hasNewAH and "new" or hasOldAH and "old" or "NO") .. " auction API")
 	elseif event == "AUCTION_HOUSE_SHOW" then
@@ -1342,3 +1350,12 @@ SlashCmdList.GLOVEMILL = function(input)
 	end
 	prevSlash(input)
 end
+
+local lf = CreateFrame("Frame")
+lf:RegisterEvent("PLAYER_LOGOUT")
+lf:SetScript("OnEvent", function()
+	if type(GloveMillDB) ~= "table" then return end
+	GloveMillDB._saved = time()
+	GloveMillMirror = {}
+	for k, v in pairs(GloveMillDB) do GloveMillMirror[k] = v end
+end)
