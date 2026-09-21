@@ -304,7 +304,7 @@ local function onPresetBrowse()
 		pcall(C_AuctionHouse.RequestMoreBrowseResults)
 		return
 	end
-	table.sort(queue, function(a, b) return a.minPrice < b.minPrice end)
+	sortQueue()
 	if needRetry and browseRetries < 3 then
 		browseRetries = browseRetries + 1
 		C_Timer.After(1, onPresetBrowse)      -- item data arrived by then; rebuild the list
@@ -314,6 +314,18 @@ local function onPresetBrowse()
 	msg(string.format("%d item type(s) fit under %s - click one in the list", #queue, moneyText(cap())))
 	queued = 0; fetching = nil; results = {}; selected = nil; listOffset = 0
 	if win and win.refresh then win.refresh() end
+end
+
+-- cheapest first: a pulled row sorts by its real cheapest buyout, an unpulled one by the AH's
+-- bid-or-buyout floor; ties go to the row with more listed, then by name
+local function sortQueue()
+	table.sort(queue, function(a, b)
+		local pa = a.pulledMin or a.minPrice or 0
+		local pb = b.pulledMin or b.minPrice or 0
+		if pa ~= pb then return pa < pb end
+		if (a.qty or 0) ~= (b.qty or 0) then return (a.qty or 0) > (b.qty or 0) end
+		return (a.name or "") < (b.name or "")
+	end)
 end
 
 -- the player picked an item type from the list: pull that one item's listings
@@ -355,6 +367,7 @@ local function collectNew(itemKey)
 			fetching.pulledMin = results[1] and results[1].price or nil
 			fetching.pulledCount = #results
 			fetching = nil
+			sortQueue()
 			msg(string.format("%s: %d buyout(s) under cap, cheapest %s - click Buy next",
 				selected and selected.name or "?", #results, results[1] and moneyText(results[1].price) or "-"))
 		elseif itemKey and selected and itemKey.itemID == selected.itemID then
