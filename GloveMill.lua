@@ -68,18 +68,22 @@ end
 -- ---------------------------------------------------------------------------
 -- Expected disenchant result, from the classic tables (green items only)
 -- ---------------------------------------------------------------------------
+-- { ilvl lo, hi, dust, essence, shard, avg dust qty }  (essence is always 1-2 -> 1.5, shard 1)
 local DE_TABLE = {
-	{ 5, 15,  "Strange Dust",  "Lesser Magic Essence",   nil },
-	{ 16, 20, "Strange Dust",  "Greater Magic Essence",  "Small Glimmering Shard" },
-	{ 21, 25, "Strange Dust",  "Lesser Astral Essence",  "Large Glimmering Shard" },
-	{ 26, 30, "Soul Dust",     "Greater Astral Essence", "Small Glowing Shard" },
-	{ 31, 35, "Soul Dust",     "Lesser Mystic Essence",  "Large Glowing Shard" },
-	{ 36, 40, "Vision Dust",   "Greater Mystic Essence", "Small Radiant Shard" },
-	{ 41, 45, "Vision Dust",   "Lesser Nether Essence",  "Large Radiant Shard" },
-	{ 46, 50, "Dream Dust",    "Greater Nether Essence", "Small Brilliant Shard" },
-	{ 51, 55, "Dream Dust",    "Lesser Eternal Essence", "Large Brilliant Shard" },
-	{ 56, 65, "Illusion Dust", "Greater Eternal Essence","Large Brilliant Shard" },
+	{ 5, 15,  "Strange Dust",  "Lesser Magic Essence",   nil,                      1.5 },
+	{ 16, 20, "Strange Dust",  "Greater Magic Essence",  "Small Glimmering Shard", 2.5 },
+	{ 21, 25, "Strange Dust",  "Lesser Astral Essence",  "Large Glimmering Shard", 5.0 },
+	{ 26, 30, "Soul Dust",     "Greater Astral Essence", "Small Glowing Shard",    1.5 },
+	{ 31, 35, "Soul Dust",     "Lesser Mystic Essence",  "Large Glowing Shard",    3.5 },
+	{ 36, 40, "Vision Dust",   "Greater Mystic Essence", "Small Radiant Shard",    1.5 },
+	{ 41, 45, "Vision Dust",   "Lesser Nether Essence",  "Large Radiant Shard",    3.5 },
+	{ 46, 50, "Dream Dust",    "Greater Nether Essence", "Small Brilliant Shard",  1.5 },
+	{ 51, 55, "Dream Dust",    "Lesser Eternal Essence", "Large Brilliant Shard",  3.5 },
+	{ 56, 65, "Illusion Dust", "Greater Eternal Essence","Large Brilliant Shard",  1.5 },
 }
+local function deRow(ilvl)
+	for _, r in ipairs(DE_TABLE) do if ilvl >= r[1] and ilvl <= r[2] then return r end end
+end
 local CLASS_WEAPON = (Enum and Enum.ItemClass and Enum.ItemClass.Weapon) or 2
 local CLASS_ARMOR  = (Enum and Enum.ItemClass and Enum.ItemClass.Armor) or 4
 local UNCOMMON     = (Enum and Enum.ItemQuality and Enum.ItemQuality.Uncommon) or 2
@@ -121,16 +125,53 @@ end
 -- ---------------------------------------------------------------------------
 -- Presets: churn through every green weapon/armor in an ilvl bracket, cheapest first
 -- ---------------------------------------------------------------------------
-local PRESETS = {
-	{ key = "item", label = "Single item by name" },
-	{ key = "w5",  label = "Weapons ilvl 5-15  (Lesser Magic Essence)",  classID = CLASS_WEAPON, min = 5,  max = 15 },
-	{ key = "w16", label = "Weapons ilvl 16-20 (Greater Magic Essence)", classID = CLASS_WEAPON, min = 16, max = 20 },
-	{ key = "w21", label = "Weapons ilvl 21-25 (Lesser Astral Essence)", classID = CLASS_WEAPON, min = 21, max = 25 },
-	{ key = "w26", label = "Weapons ilvl 26-30 (Greater Astral Essence)", classID = CLASS_WEAPON, min = 26, max = 30 },
-	{ key = "a5",  label = "Armor ilvl 5-15  (Strange Dust)",             classID = CLASS_ARMOR,  min = 5,  max = 15 },
-	{ key = "a16", label = "Armor ilvl 16-20 (Strange Dust)",             classID = CLASS_ARMOR,  min = 16, max = 20 },
-	{ key = "a26", label = "Armor ilvl 26-30 (Soul Dust)",                classID = CLASS_ARMOR,  min = 26, max = 30 },
-}
+local PRESETS = { { key = "item", label = "Single item by name" } }
+do
+	local ranges = { {5,15},{16,20},{21,25},{26,30},{31,35},{36,40},{41,45},{46,50},{51,55} }
+	for _, r in ipairs(ranges) do
+		local row = deRow(r[1])
+		PRESETS[#PRESETS + 1] = { key = "w" .. r[1], label = string.format("Weapons ilvl %d-%d (%s)", r[1], r[2], row[4]), classID = CLASS_WEAPON, min = r[1], max = r[2] }
+	end
+	for _, r in ipairs(ranges) do
+		local row = deRow(r[1])
+		PRESETS[#PRESETS + 1] = { key = "a" .. r[1], label = string.format("Armor ilvl %d-%d (%s)", r[1], r[2], row[3]), classID = CLASS_ARMOR, min = r[1], max = r[2] }
+	end
+end
+-- ---------------------------------------------------------------------------
+-- Mat prices and expected disenchant value
+--   db.matPrice[name] = { price = copper each, src = "listing"|"ah"|"manual", t = time }
+--   Your own listing price (what you sold at) beats an AH floor, which beats nothing.
+-- ---------------------------------------------------------------------------
+local function matPrice(name)
+	if not name then return nil end
+	local mp = db and db.matPrice and db.matPrice[name]
+	local own = db and db.unitPrice and db.unitPrice[name]
+	if own then return own, "listing" end
+	if mp then return mp.price, mp.src end
+	return nil
+end
+local function setMatPrice(name, price, src)
+	if not name or not price then return end
+	db.matPrice = db.matPrice or {}
+	db.matPrice[name] = { price = price, src = src, t = time() }
+end
+
+-- expected mats value of disenchanting one green of this ilvl/class, in copper, or nil + missing mat
+local function deValue(ilvl, classID)
+	local row = deRow(ilvl or 0)
+	if not row then return nil, "no table row" end
+	local weapon = classID == CLASS_WEAPON
+	local dustPct, essPct, shardPct = 0.75, 0.20, (row[5] and 0.05 or 0)
+	if weapon then dustPct, essPct = 0.20, 0.75 end
+	if not row[5] then dustPct = weapon and 0.20 or 0.80; essPct = weapon and 0.80 or 0.20 end
+	local dust, dsrc = matPrice(row[3]); local ess, esrc = matPrice(row[4]); local shard = row[5] and matPrice(row[5]) or 0
+	if not dust then return nil, row[3] end
+	if not ess then return nil, row[4] end
+	if row[5] and not shard then shard = 0 end            -- shard unpriced: count it as 0, still useful
+	local ev = dustPct * row[6] * dust + essPct * 1.5 * ess + shardPct * 1 * (shard or 0)
+	return math.floor(ev), nil, { dust = dust, ess = ess, shard = shard, dsrc = dsrc, esrc = esrc }
+end
+
 local function currentPreset()
 	local k = db and db.preset or "item"
 	for _, p in ipairs(PRESETS) do if p.key == k and p.classID then return p end end
@@ -345,7 +386,49 @@ local function selectType(entry)
 	if win and win.refresh then win.refresh() end
 end
 
+-- Price mats: browse each of the bracket's mats by name and record its floor price
+local matQueue, matFetching = {}, nil
+local function priceMatsNext()
+	if matFetching or #matQueue == 0 then return end
+	matFetching = table.remove(matQueue, 1)
+	local ok = pcall(C_AuctionHouse.SendBrowseQuery, { searchString = matFetching, sorts = { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } }, filters = {}, itemClassFilters = {} })
+	if not ok then matFetching = nil end
+end
+local function priceMats()
+	local p = currentPreset()
+	if not p then msg("pick a preset first"); return end
+	if not ahOpen or not hasNewAH then msg("open the auction house first"); return end
+	local row = deRow(p.min)
+	matQueue = { row[3], row[4] }
+	if row[5] then matQueue[#matQueue + 1] = row[5] end
+	msg("pricing " .. table.concat(matQueue, ", ") .. "...")
+	priceMatsNext()
+end
+local function onMatBrowse()
+	local name = matFetching
+	if not name then return false end
+	local list = C_AuctionHouse.GetBrowseResults and C_AuctionHouse.GetBrowseResults() or {}
+	local best
+	for _, r in ipairs(list) do
+		local key = r.itemKey
+		if key and key.itemID then
+			local ok, info = pcall(C_AuctionHouse.GetItemKeyInfo, key)
+			local n = ok and type(info) == "table" and info.itemName or nameForID(key.itemID)
+			if sameName(n, name) and r.minPrice and r.containsOwnerItem ~= true then
+				local pr = r.minPrice
+				if not (issecretvalue and issecretvalue(pr)) and (not best or pr < best) then best = pr end
+			end
+		end
+	end
+	if best then setMatPrice(name, best, "ah"); msg(string.format("%s: %s each (AH floor)", name, moneyText(best)))
+	else msg(name .. ": nothing listed") end
+	matFetching = nil
+	if #matQueue > 0 then C_Timer.After(0.4, priceMatsNext) else if win and win.refresh then win.refresh() end end
+	return true
+end
+
 local function onBrowse()
+	if onMatBrowse() then return end
 	if currentPreset() then onPresetBrowse(); return end
 	if db.itemID and db.itemIDName == targetName() then return end
 	local list = C_AuctionHouse.GetBrowseResults and C_AuctionHouse.GetBrowseResults() or {}
@@ -822,11 +905,15 @@ local listHint = listFrame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmal
 listHint:SetPoint("TOPLEFT", 4, -2); listHint:SetWidth(284); listHint:SetJustifyH("LEFT")
 
 local scanBtn = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
-scanBtn:SetSize(90, 24); scanBtn:SetPoint("TOPLEFT", 14, -320); scanBtn:SetText("Scan AH")
+scanBtn:SetSize(84, 24); scanBtn:SetPoint("TOPLEFT", 14, -320); scanBtn:SetText("Scan AH")
 scanBtn:SetScript("OnClick", scan)
 
+local matBtn = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
+matBtn:SetSize(84, 24); matBtn:SetPoint("LEFT", scanBtn, "RIGHT", 6, 0); matBtn:SetText("Price mats")
+matBtn:SetScript("OnClick", priceMats)
+
 local buyBtn = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
-buyBtn:SetSize(150, 24); buyBtn:SetPoint("LEFT", scanBtn, "RIGHT", 8, 0); buyBtn:SetText("Buy next")
+buyBtn:SetSize(104, 24); buyBtn:SetPoint("LEFT", matBtn, "RIGHT", 6, 0); buyBtn:SetText("Buy next")
 buyBtn:SetScript("OnClick", function() buyNext(); win.refresh() end)
 
 -- Secure button: the only way an addon may cast. Macro text is rebuilt before each click
@@ -867,8 +954,15 @@ function win.refresh()
 	itemLbl:SetShown(not p); itemBoxMain:SetShown(not p)
 	if not itemBoxMain:HasFocus() then itemBoxMain:SetText(targetName()) end
 	if p then
-		local text = expectedDE(p.min, UNCOMMON, p.classID, p.classID == CLASS_WEAPON and 1 or 1)
-		deLine:SetText(string.format("%s\nexpect %s", p.label, text or "?"))
+		local ev, missing, parts = deValue(p.min, p.classID)
+		local row = deRow(p.min)
+		local evText
+		if ev then
+			evText = string.format("DE worth ~%s each (dust %s, essence %s%s)", moneyText(ev), moneyText(parts.dust), moneyText(parts.ess), (row[5] and parts.shard and parts.shard > 0) and (", shard " .. moneyText(parts.shard)) or "")
+		else
+			evText = "|cffff8080no price for " .. tostring(missing) .. "|r - click Price mats"
+		end
+		deLine:SetText(string.format("%s\n%s", p.label, evText))
 	else
 		local id = itemIDForTarget()
 		local name, ilvl, quality, classID = itemFacts(id or targetName())
@@ -907,10 +1001,17 @@ function win.refresh()
 			if e then
 				local _, ilvl = itemFacts(e.itemID)
 				b.name:SetText(string.format("%s%s|r  |cff808080%s|r", selected == e and "|cffffd080" or "", e.name, ilvl and ("i" .. ilvl) or ""))
+				local cost = e.pulledMin or e.minPrice
+				local ev = deValue(ilvl, p.classID)
+				local evText = ""
+				if ev and cost then
+					local margin = math.floor(ev * (1 - AH_CUT)) - cost
+					evText = string.format("  %s%s|r", margin >= 0 and "|cff80ff80+" or "|cffff8080-", moneyText(math.abs(margin)))
+				end
 				if e.pulledCount ~= nil then
-					b.price:SetText((e.pulledMin and ("buyout " .. moneyText(e.pulledMin)) or "|cffff8080none|r") .. "  |cff808080" .. e.pulledCount .. " under cap|r")
+					b.price:SetText((e.pulledMin and moneyText(e.pulledMin) or "|cffff8080none|r") .. " |cff808080x" .. e.pulledCount .. "|r" .. evText)
 				else
-					b.price:SetText("|cff808080bid/buyout from|r " .. moneyText(e.minPrice) .. (e.qty and ("  |cff808080" .. e.qty .. " listed|r") or ""))
+					b.price:SetText(moneyText(e.minPrice) .. "|cff808080~|r" .. evText)
 				end
 				b.bg:SetColorTexture(1, 1, 1, selected == e and 0.18 or ((i % 2 == 0) and 0.06 or 0.03))
 				b:Show()
@@ -1006,6 +1107,11 @@ SlashCmdList.GLOVEMILL = function(input)
 		for _, p in ipairs(PRESETS) do if p.key == rest then found = p end end
 		if found then db.preset = found.key; results = {}; queue = {}; msg("preset: " .. found.label)
 		else msg("presets: " .. (function() local t = {} for _, p in ipairs(PRESETS) do t[#t+1] = p.key end return table.concat(t, " ") end)()) end
+	elseif cmd == "mat" and rest ~= "" then
+		local name, price = string.match(rest, "^(.-)%s+(%S+)$")
+		local c = price and parseMoney(price)
+		if name and c then setMatPrice(strtrim(name), c, "manual"); msg(name .. " set to " .. moneyText(c) .. " each"); if win and win.refresh then win.refresh() end
+		else msg("say it like: /gm mat Strange Dust 12s") end
 	elseif cmd == "probe" then
 		local e = queue[1]
 		if not e then msg("probe: the list is empty - Scan first"); return end
